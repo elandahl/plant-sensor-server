@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime, timezone
 import csv
 import json
@@ -111,6 +111,17 @@ def api_latest():
 
     return jsonify(output)
 
+
+@app.route("/data", methods=["GET"])
+def list_data_files():
+    files = sorted(os.listdir(DATA_DIR))
+    links = [f'<a href="/data/{f}">{f}</a>' for f in files]
+    return "<br>".join(links)
+
+
+@app.route("/data/<filename>", methods=["GET"])
+def get_data_file(filename):
+    return send_from_directory(DATA_DIR, filename, as_attachment=False)
 
 @app.route("/check", methods=["GET"])
 def check():
