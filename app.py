@@ -52,7 +52,11 @@ def append_csv(record):
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "server": "plant-pi",
+        "version": "step2-test"
+    })
 
 
 @app.route("/api/submit", methods=["POST"])
