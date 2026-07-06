@@ -71,10 +71,14 @@ The firmware in `pico/` is written for **MicroPython**, not CircuitPython. You c
 
 ### Flashing MicroPython on Pico W
 
-1. Download the latest **Raspberry Pi Pico W** MicroPython UF2 from [micropython.org/download/RPI_PICO_W](https://micropython.org/download/RPI_PICO_W/).
+**Use a Bluetooth-capable build** even if you only run WiFi today — the full project roadmap (including BLE occupancy) requires BT in the UF2, and the runtime **cannot be updated over OTA**. See [Implementation order (OTA-first)](docs/ROADMAP.md#implementation-order-ota-first) in the roadmap.
+
+1. Download the latest **Raspberry Pi Pico W** MicroPython UF2 from [micropython.org/download/RPI_PICO_W](https://micropython.org/download/RPI_PICO_W/) (must support `import bluetooth`).
 2. Hold **BOOTSEL**, plug in USB, release — the board appears as a USB drive.
 3. Copy the `.uf2` file onto the drive; the board reboots into MicroPython.
-4. Copy `main.py`, `secrets.py`, and install `urequests` (bundled in recent MicroPython builds or copy from the [micropython-lib](https://github.com/micropython/micropython-lib) project) to the Pico filesystem via Thonny, `mpremote`, or `rshell`.
+4. In REPL, confirm `import network` and `import bluetooth` both succeed.
+5. Copy `main.py`, `secrets.py`, and `urequests` to the Pico via Thonny, `mpremote`, or `rshell`.
+6. Before sealing a field enclosure, complete the [USB-once checklist](docs/ROADMAP.md#usb-once-checklist-per-pico) — especially the **OTA-capable bootstrap** (Step 1) so later features update over WiFi.
 
 ## Hosting the server
 
@@ -208,7 +212,7 @@ HTML table of all known nodes and their last readings.
 plant-sensor-server/
 ├── app.py                 # Flask server (host computer)
 ├── docs/
-│   └── ROADMAP.md         # Architecture and planned features (OTA, sensor discovery)
+│   └── ROADMAP.md         # Implementation order, OTA strategy, feature plans
 ├── pico/
 │   ├── main.py            # MicroPython firmware (Pico W)
 │   └── secrets_template.py
@@ -218,7 +222,17 @@ plant-sensor-server/
 
 ## Development roadmap
 
-Planned features, deployment strategy (production `main` alongside feature branches), and phased designs for **WiFi OTA updates** and **I2C sensor identification** (Adafruit breakouts) are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
+Full plans live in [docs/ROADMAP.md](docs/ROADMAP.md). Start with **[Implementation order (OTA-first)](docs/ROADMAP.md#implementation-order-ota-first)** — it defines what to do in what order so the whole project updates over WiFi after one USB bootstrap per Pico.
+
+| Step | Feature |
+|------|---------|
+| **0** | USB bootstrap — BT-capable UF2, `secrets.py`, OTA client (once per board) |
+| **1** | WiFi OTA — manifest, updater, modular `main.py` (**gate for field rollout**) |
+| **2** | I2C sensor identification — Adafruit breakouts, drivers via OTA |
+| **3** | Measurement integrity — GPIO heater, impulse / PRBS thermal probe |
+| **4** | BLE occupancy estimation — presence for events, airflow, heat-load anticipation |
+
+**Today’s field nodes** run Step 0 partially (UF2 + current `main.py`) without OTA yet. New Picos should still use a **Bluetooth-capable UF2** at first flash so Steps 1–4 never require a USB recall.
 
 ## License
 

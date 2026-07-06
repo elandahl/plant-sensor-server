@@ -4,6 +4,124 @@ This document describes how the plant-sensor-server architecture scales to new f
 
 For current behavior and setup, see [README.md](../README.md).
 
+## Implementation order (OTA-first)
+
+**Goal:** Build the full project (OTA, sensor discovery, integrity testing, BLE occupancy) so that **after one USB bootstrap per Pico**, all application code, drivers, and libraries update over WiFi. Only the items in the [USB-once checklist](#usb-once-checklist-per-pico) require a physical cable.
+
+### Master sequence
+
+Do these in order. Later features may be **prototyped in the lab** in parallel, but **field rollout** of each feature depends on the rows above it.
+
+| Step | What | Branch (typical) | Field rollout requires | Updates after bootstrap |
+|------|------|------------------|------------------------|-------------------------|
+| **0** | [USB bootstrap](#usb-once-checklist-per-pico) on every new Pico | — | — | — (one-time USB) |
+| **1** | **WiFi OTA** — manifest, updater, modular `main.py` | `feature/pico-ota` | Step 0 on each node | Server + Pico app via OTA |
+| **2** | **I2C sensor identification** — scan, drivers, registry | `feature/i2c-sensor-discovery` | Step 1 | `sensors/`, `lib/` via OTA |
+| **3** | **Measurement integrity** — GPIO heater, impulse / PRBS | `feature/measurement-integrity` | Step 1 (Step 2 for multi-sensor scoring) | `integrity/` via OTA |
+| **4** | **BLE occupancy** — presence sensing, event / heat-load hints | `feature/ble-occupancy` | Step 1; BT-capable UF2 from Step 0 | `ble/`, `lib/aioble/` via OTA |
+
+```mermaid
+flowchart TD
+  S0[Step 0: USB bootstrap\nBT-capable UF2 + secrets + OTA client]
+  S1[Step 1: OTA on server + Pico]
+  S2[Step 2: I2C discovery + drivers]
+  S3[Step 3: Integrity heater tests]
+  S4[Step 4: BLE occupancy scans]
+  S0 --> S1
+  S1 --> S2
+  S1 --> S3
+  S1 --> S4
+  S2 -.->|CO2 fusion| S4
+  S3 -.->|schedule arbitration| S4
+```
+
+**Step 1 is the gate.** Until OTA works, every Pico change is a USB visit. Implement and merge OTA before rolling any later feature to field nodes.
+
+**Step 0 is the insurance policy.** Choices made at first USB flash (especially the MicroPython UF2) cannot be fixed over OTA. Get Step 0 right on every node you deploy today, even while still running the current AHT20-only `main.py`.
+
+### USB-once checklist (per Pico)
+
+Complete these **once per board** at provisioning (lab or field). After this, prefer WiFi OTA for all application changes.
+
+| # | Action | Why it cannot be OTA’d later |
+|---|--------|------------------------------|
+| 1 | Flash **Bluetooth-capable** [RPI_PICO_W MicroPython UF2](https://micropython.org/download/RPI_PICO_W/) | Runtime firmware is USB/BOOTSEL only |
+| 2 | Verify `import bluetooth` and `import network` in REPL | Confirms correct UF2 before sealing enclosure |
+| 3 | Copy `secrets.py` (from `secrets_template.py`) | WiFi credentials; never overwritten by OTA |
+| 4 | Copy **`urequests`** (and any other bundled deps) to `lib/` if not in firmware | HTTP for submit + OTA download |
+| 5 | Install **OTA-capable bootstrap** — first `main.py` + `update.py` (Feature 1) with modular layout | Last mandatory USB if done before sealing; enables all future updates |
+| 6 | Optional: pre-load `lib/aioble/`, empty `sensors/`, `integrity/`, `ble/` stubs | Saves first OTA round-trip; not required if OTA works |
+| 7 | Set `NODE_ID`, `SERVER_URL`, initial `FIRMWARE_VERSION` | `secrets.py` / config; URL can move to remote config later |
+| 8 | Record `node_id` + commissioned `firmware_version` on server | Traceability for manifest targeting |
+
+**Do not USB-flash a non-Bluetooth UF2** on nodes intended for the full roadmap — Feature 4 would require recalling every board.
+
+### OTA-updatable (everything else)
+
+After Step 1 works, ship these over WiFi via manifest (hash-verified, never touch `secrets.py`):
+
+| Path on Pico | Contents |
+|--------------|----------|
+| `main.py` | Main loop, scheduling, radio time-slicing |
+| `update.py` | OTA client (keep stable; update cautiously) |
+| `boot.py` | Optional rollback after bad OTA |
+| `i2c_bus.py`, `discovery.py` | Feature 2 |
+| `sensors/*.py` | Per-board drivers (AHT20, SCD41, …) |
+| `integrity/*.py` | Feature 3 heater + scoring |
+| `ble/*.py` | Feature 4 scan + occupancy model |
+| `lib/**` | `aioble`, vendored micropython-lib, shared helpers |
+
+Server hosts release artifacts under `firmware/releases/<version>/` with a manifest listing every file, SHA-256, and size. See [Feature 1](#feature-1-wifi-ota-application-updates).
+
+### Target Pico filesystem (end state)
+
+Evolve toward this layout during Step 1 so OTA never requires restructuring:
+
+```
+pico/
+├── boot.py              # optional rollback
+├── main.py              # state machine: SENSOR | BLE_SCAN | INTEGRITY | OTA | WIFI_POST
+├── update.py            # OTA client
+├── secrets.py           # USB only — not in manifest
+├── schedule.py          # arbitrates timed activities (Feature 3 + 4)
+├── i2c_bus.py           # Feature 2
+├── discovery.py         # Feature 2
+├── sensors/             # Feature 2 — OTA
+├── integrity/           # Feature 3 — OTA
+├── ble/                 # Feature 4 — OTA
+└── lib/                 # urequests, aioble, … — OTA
+```
+
+**Main-loop rule (from Step 1 onward):** implement explicit **phases** rather than a single monolithic loop. Later features add phases (`INTEGRITY`, `BLE_SCAN`) and `schedule.py` coordinates them. Retrofitting this after field deploy is painful; build it into the Feature 1 refactor.
+
+### Host server order
+
+| Step | Server work |
+|------|-------------|
+| 0 | Run current `app.py` on `:5000` (production) |
+| 1 | Add manifest + `/api/firmware/*`; deploy on `:5001` until merged; then production |
+| 2 | Accept `attached_sensors`; driver registry; build manifests from registry |
+| 3 | Display integrity metrics on `/check` |
+| 4 | Store occupancy fields; optional CO₂ + BLE fusion rules |
+
+Use **git worktrees** to run production (`main`, port 5000) and feature branches (port 5001) side by side while field nodes stay on production.
+
+### Lab vs field policy
+
+| Environment | Policy |
+|-------------|--------|
+| **Lab / test Pico** | Point at `:5001`; run feature branches; OK to USB-flash frequently |
+| **Field nodes** | Stay on production `:5000` until Step 1 OTA is merged and tested; then receive OTA manifests only |
+| **New field nodes** | Complete [USB-once checklist](#usb-once-checklist-per-pico) with OTA bootstrap before install |
+
+### What never ships via OTA
+
+- MicroPython **UF2 runtime** (use USB + BOOTSEL)
+- **`secrets.py`** (WiFi password)
+- Hardware you haven't wired yet (heater, new I2C board) — software can arrive OTA, but physical install is still manual
+
+---
+
 ## Core architecture
 
 ```
@@ -34,9 +152,11 @@ This pattern supports most future work without redesign:
 | **Remote config** | JSON in submit response or `GET /api/node/<id>/config` | Read interval, alert thresholds |
 | **Application code** | OTA file download (see Feature 1) | New drivers, sensor libraries, bug fixes |
 | **Server-only** | Flask changes | `/check` UI, notifications, analytics |
-| **One-time / risky** | USB flash | MicroPython runtime, bootstrap firmware |
+| **One-time / risky** | USB flash | MicroPython UF2 runtime, `secrets.py`, first OTA bootstrap |
 
-As features accumulate, expect the Flask app to split into modules (blueprints) such as `ingest`, `firmware`, `config`, and `admin`. Pico firmware should split similarly (`wifi.py`, `sensors/`, `update.py`, etc.) so OTA can update pieces independently.
+See [Implementation order (OTA-first)](#implementation-order-ota-first) for the full sequence and USB-once checklist.
+
+As features accumulate, expect the Flask app to split into modules (blueprints) such as `ingest`, `firmware`, `config`, and `admin`. Pico firmware should follow the [target filesystem layout](#target-pico-filesystem-end-state) so OTA can update pieces independently.
 
 ---
 
@@ -72,13 +192,14 @@ Run two server processes on different ports until a feature is proven, then merg
 | OTA updates | `feature/pico-ota` |
 | I2C sensor identification | `feature/i2c-sensor-discovery` |
 | Measurement integrity | `feature/measurement-integrity` |
+| BLE occupancy estimation | `feature/ble-occupancy` |
 
 ---
 
-## Feature 1: WiFi OTA (application updates)
+## Feature 1: WiFi OTA (application updates) — Step 1
 
 **Branch:** `feature/pico-ota`  
-**Status:** Planned — not started  
+**Status:** Planned — not started — **implement before field rollout of Features 2–4**  
 **Scope:** Update `.py` files on the Pico filesystem over WiFi. Does **not** include reflashing the MicroPython UF2 runtime (USB only for that).
 
 ### Why this is feasible
@@ -136,7 +257,9 @@ Optional `boot.py` for rollback if the new code fails immediately after reboot.
 - **Verify before swap** — hash + size at minimum.
 - **Download to temp, then rename** — avoid half-written files on power loss.
 - **Keep `main.py.bak`** for manual or automatic rollback.
-- **Bootstrap problem:** the first OTA-aware firmware must reach each Pico **once via USB**. After that, updates are over WiFi.
+- **Bootstrap problem:** the first OTA-aware firmware must reach each Pico **once via USB** ([USB-once checklist](#usb-once-checklist-per-pico), items 5–7). After that, updates are over WiFi.
+- **Bluetooth-ready UF2 (Step 0):** flash a **Bluetooth-capable** MicroPython build at bootstrap even before BLE software exists — see [Step 0](#usb-once-checklist-per-pico).
+- **Modular main loop:** refactor to explicit phases (`SENSOR`, `WIFI_POST`, later `OTA`, `INTEGRITY`, `BLE_SCAN`) per [target filesystem](#target-pico-filesystem-end-state).
 
 ### Rollout phases
 
@@ -156,10 +279,10 @@ Optional `boot.py` for rollback if the new code fails immediately after reboot.
 
 ---
 
-## Feature 2: I2C sensor identification (next after OTA)
+## Feature 2: I2C sensor identification — Step 2
 
 **Branch:** `feature/i2c-sensor-discovery`  
-**Status:** Planned — depends on OTA for painless field rollout  
+**Status:** Planned — lab work can start early; **field rollout requires Step 1 (OTA)**  
 **Scope:** Detect which Adafruit (and compatible) sensor boards are attached on the I2C bus, report capabilities to the server, and read from supported drivers dynamically.
 
 Today, `pico/main.py` hardcodes a single **AHT20** at address `0x38` on GP4/GP5. Future nodes may carry different or multiple boards: higher-resolution temperature, VOC, CO2, particulate matter, etc.
@@ -174,7 +297,7 @@ Today, `pico/main.py` hardcodes a single **AHT20** at address `0x38` on GP4/GP5.
 
 ### Why OTA comes first
 
-New sensor drivers and their supporting libraries will ship as files on the Pico filesystem. Without OTA, every new Adafruit board support requires a USB visit to each field Pico. OTA makes driver and library additions deployable from the server.
+New sensor drivers and their supporting libraries ship as files under `sensors/` and `lib/`. **Lab development** can use USB copy; **field rollout** of new boards requires Step 1 OTA — see [Implementation order](#implementation-order-ota-first).
 
 ### Driver libraries: pre-load and OTA update
 
@@ -183,7 +306,7 @@ We will not rely on CircuitPython bundles or `mip` alone for field nodes. Each s
 | Method | When | What |
 |--------|------|------|
 | **USB pre-load** | Initial flash, new hardware in the lab, or recovery | Copy `main.py`, `sensors/`, `lib/`, and `secrets.py` via Thonny / `mpremote` |
-| **OTA update** | Field rollout after Feature 1 | Server manifest delivers new or changed files under `sensors/` and `lib/` |
+| **OTA update** | Field rollout after Step 1 | Server manifest delivers new or changed files under `sensors/` and `lib/` |
 
 **Pre-load (bootstrap):** When a node is first provisioned, install the full known driver set (or a “starter bundle” for the boards expected on that node). Flash is cheap relative to RAM; pre-loading common Adafruit drivers avoids a download on first boot in the greenhouse.
 
@@ -298,9 +421,9 @@ Server should store `attached_sensors` in CSV or a structured column for history
 | 1 | Extract AHT20 into `sensors/aht20.py`; add `i2c_bus.py` | — |
 | 2 | `discovery.py` + `attached_sensors` in payload; server stores/displays | Phase 1 |
 | 3 | Add second driver + any `lib/` deps; USB pre-load on lab Pico | — |
-| 4 | Table-driven driver registry (board → files); OTA manifest includes `sensors/` + `lib/` | Feature 1 |
+| 4 | Table-driven driver registry (board → files); OTA manifest includes `sensors/` + `lib/` | Step 1 |
 | 5 | Lab test: identify new board → server pushes missing driver via OTA | Phases 3–4 |
-| 6 | Discovery + library OTA to field nodes | Feature 1 complete |
+| 6 | Discovery + library OTA to field nodes | Step 1 complete |
 
 ### Risks and constraints
 
@@ -312,10 +435,10 @@ Server should store `attached_sensors` in CSV or a structured column for history
 
 ---
 
-## Feature 3: Measurement integrity (thermal system ID: impulse response or PRBS cross-correlation)
+## Feature 3: Measurement integrity — Step 3
 
 **Branch:** `feature/measurement-integrity`  
-**Status:** Planned — next feature after I2C sensor identification  
+**Status:** Planned — after Step 2 for multi-sensor scoring; lab bench can use hardcoded AHT20 earlier  
 **Scope:** Replace the placeholder `integrity` block with a real **sensor health check** that verifies the temperature channel responds to a known physical stimulus. Phase 1 uses a **GPIO-driven heating resistor** placed near the temperature sensor; excitation is either a **time-domain impulse** or **PRBS (pseudo-random binary sequence)** with **cross-correlation** to recover the thermal impulse response.
 
 Today, `pico/main.py` always reports `"state": "green"` with no verification. A stuck, disconnected, or drifting sensor can still produce plausible-looking readings. Integrity testing injects a controlled heat input and checks that the sensor’s temperature trace matches expected dynamics.
@@ -441,6 +564,7 @@ Heavy correlation analysis can stay **on the Pico** in phase 1; server receives 
 | Feature 2 (sensor ID) | Know which device is the primary temperature channel for scoring |
 | Feature 1 (OTA) | Ship `integrity/` module and algorithm tweaks without USB |
 | Modular `sensors/` | Fast repeated reads during test window |
+| `schedule.py` | Coordinate integrity windows with BLE and OTA (Step 4) |
 
 Integrity phase 1 can start with **hardcoded AHT20** on the lab bench before Feature 2 is complete.
 
@@ -453,7 +577,7 @@ Integrity phase 1 can start with **hardcoded AHT20** on the lab bench before Fea
 | 3 | Server `/check` shows integrity score, mode, test age | Phase 2 |
 | 4 | PRBS generator + cross-correlation path; compare vs impulse in lab | Phase 2 |
 | 5 | Scheduled tests + cooldown; optional server-triggered test (remote config) | Phase 3 |
-| 6 | OTA rollout of `integrity/` to field; baseline capture at install | Feature 1 |
+| 6 | OTA rollout of `integrity/` to field; baseline capture at install | Step 1 |
 
 ### Risks and constraints
 
@@ -472,6 +596,170 @@ Integrity phase 1 can start with **hardcoded AHT20** on the lab bench before Fea
 
 ---
 
+## Feature 4: BLE occupancy estimation — Step 4
+
+**Branch:** `feature/ble-occupancy`  
+**Status:** Planned — after Step 1 (OTA); CO₂ fusion best after Step 2  
+**Scope:** Use the Pico W’s onboard **Bluetooth Low Energy (BLE)** radio to passively scan for nearby advertising devices and produce an **occupancy estimate** — presence and activity level, **not a headcount**. Counts are intentionally fuzzy; utility comes from **trends, thresholds, and correlation** with environmental sensors.
+
+### Plant utility (why this feature)
+
+Occupancy is environmental context for climate control, not surveillance:
+
+| Signal | Use |
+|--------|-----|
+| **Public event in progress** | Elevated BLE presence → adjust temperature setpoints and **airflow/ventilation** proactively before CO₂ and heat build up in occupied zones |
+| **Upcoming activity (leading indicator)** | People arriving at the **brewery, bakery, or coffee roaster** often precede **process heat** by minutes. Rising presence near those areas raises the likelihood of imminent heat load — useful for HVAC pre-conditioning or operator alerts |
+| **Quiet vs busy baseline** | Relative change (“busier than this hour yesterday”) survives MAC randomization better than absolute numbers |
+| **Cross-check with CO₂** (Feature 2) | BLE is fast but noisy; CO₂ lags but integrates occupancy. Together they support a more credible presence state than either alone |
+
+This is **aggregate presence sensing** for building/plant operations. Do not store identities, persistent device fingerprints, or location histories of individuals.
+
+### Concept
+
+```
+  [ BLE scan window ]          [ WiFi window ]
+  listen for advertisements →  POST readings + occupancy metrics
+         ↑                              ↑
+    aioble scan                   urequests /api/submit
+         └──── time-multiplexed on single CYW43439 radio ────┘
+```
+
+The Pico W CYW43439 chip shares **one 2.4 GHz radio** between WiFi and BLE. Simultaneous WiFi + BLE is unreliable. The firmware **alternates**: scan for N seconds with WiFi down, then bring WiFi up, post results, return to normal sensor polling.
+
+### What we measure (not headcount)
+
+| Metric | Meaning |
+|--------|---------|
+| `ble_devices_seen` | Distinct advertisers observed in the scan window (deduped within window) |
+| `ble_devices_close` | Subset above RSSI threshold (proximity proxy, coarse) |
+| `occupancy_estimate` | Model output: low / medium / high or integer bucket — tuned on site, OTA-updatable |
+| `presence_trend` | Optional: rising / stable / falling vs recent baseline (server-side or on-Pico) |
+
+**MAC randomization** (iOS/Android) prevents treating unique MACs as people. The model should use **counts in a window**, **RSSI distribution**, and **rate of change**, not persistent MAC tracking. Optional sub-mode: **dedicated beacons** (iBeacon/Eddystone tags on carts, doors, staff badges) with stable IDs for higher-confidence presence zones — separate from ambient phone counting.
+
+### Difficulties
+
+| Difficulty | Implication |
+|------------|-------------|
+| **WiFi / BLE coexistence** | Must time-slice; node is briefly unreachable over WiFi during scan |
+| **MAC randomization** | Overcounting and rotation; estimate presence, not persons |
+| **RSSI noise** | Walls, bodies, orientation; use thresholds and smoothing |
+| **RAM** | Device table (address + RSSI + last seen) must be capped and expired |
+| **MicroPython BLE stack** | Requires recent **Pico W MicroPython** with Bluetooth enabled; API via `bluetooth` + **`aioble`** (micropython-lib) |
+| **Scan duration vs duty cycle** | Longer scans improve detection; shorter scans save power and WiFi downtime |
+| **Privacy / policy** | Document intent: aggregate counts only; no PII; consider signage if required locally |
+
+### Opportunities
+
+- **No extra hardware** — uses onboard radio already present on Pico W
+- **OTA-tunable models** — occupancy logic in `ble/` Python modules can be refined in the field after Feature 1
+- **Pairs with CO₂ and temperature** — event detection and “heat load incoming” heuristics
+- **Server-side enrichment** — Flask can fuse BLE metrics with CO₂ slope, time-of-day baselines, and manual “event scheduled” flags
+- **Dedicated beacons** — optional upgrade path for zone-specific presence (e.g. roaster area vs public gallery)
+
+### Bootstrap and OTA (Steps 0 and 1)
+
+BLE software is almost entirely **OTA-updatable** (`ble/`, `lib/aioble/`). The exception is the **MicroPython UF2**, which must include Bluetooth support at **Step 0** USB flash — see [USB-once checklist](#usb-once-checklist-per-pico).
+
+| Component | When | How |
+|-----------|------|-----|
+| BT-capable UF2 | Step 0 (USB) | Required before sealing enclosure |
+| `lib/aioble/` | Step 0 pre-load or Step 1 OTA | In manifest like sensor drivers |
+| `ble/*.py` | Step 4 OTA | Primary Feature 4 deliverable |
+| Radio time-slicing in `main.py` | Step 1 refactor | Add `BLE_SCAN` phase; do not bolt on later |
+
+Feature 1 manifest format should list `lib/aioble/` with hash verification, same as `sensors/`.
+
+### Pico software sketch
+
+```
+pico/
+├── main.py              # state machine: sensor poll | ble_scan | wifi_post
+├── ble/
+│   ├── __init__.py
+│   ├── scan.py          # aioble passive scan for duration_s
+│   ├── dedup.py         # in-window dedup, RSSI max per address, table cap
+│   ├── scoring.py       # devices_seen → occupancy_estimate bucket
+│   └── schedule.py      # when to scan vs post vs integrity test
+└── lib/
+    └── aioble/          # vendored micropython-lib (pre-load or OTA)
+```
+
+**Scheduling interaction:** BLE scans must not overlap integrity heater tests (Feature 3) or OTA downloads (Feature 1). Central `schedule.py` (or equivalent) arbitrates radio and actuator windows.
+
+### Payload extension
+
+```json
+{
+  "readings": {
+    "temperature_F": 72.5,
+    "humidity_percent": 48.2,
+    "co2_ppm": 640,
+    "ble_devices_seen": 12,
+    "ble_devices_close": 4,
+    "occupancy_estimate": 2,
+    "occupancy_band": "medium"
+  },
+  "integrity": { "state": "green", "..." : "..." },
+  "ble_scan": {
+    "window_s": 25,
+    "scan_timestamp_node": "",
+    "beacon_matches": 0
+  }
+}
+```
+
+`occupancy_band` might be `"low" | "medium" | "high" | "event"`. Server rules (later): if `occupancy_band >= medium` and rising CO₂ slope → suggest increased ventilation; if presence rises near roaster node ID → flag likely heat load.
+
+### Server changes
+
+| Change | Purpose |
+|--------|---------|
+| Store BLE fields in CSV / `readings_json` | Trending and event detection |
+| `/check` column or badge | Show occupancy band and scan age |
+| Optional fusion job | Combine BLE + CO₂ + time-of-day baseline per zone |
+| Optional manual event calendar | Override or confirm “public event” mode |
+| Alert hooks (later) | Notify when occupancy crosses threshold for HVAC integration |
+
+### Dependencies
+
+| Feature | Relationship |
+|---------|--------------|
+| **Feature 1 (OTA)** | Ship and tune `ble/` + `aioble` without USB |
+| **Feature 2 (CO₂ sensor)** | Strong synergy for presence validation; not strictly required for phase 1 BLE counts |
+| **Feature 3 (integrity)** | Schedule arbitration — no BLE scan during thermal test |
+| **Remote config** (future) | Tune RSSI thresholds and scan duty cycle per zone |
+
+### Rollout phases
+
+| Phase | Work | Depends on |
+|-------|------|------------|
+| 0 | Confirm [Step 0](#usb-once-checklist-per-pico) BT-capable UF2 on all nodes | — |
+| 1 | Bench: `aioble` scan, print addresses + RSSI | Phase 0 |
+| 2 | `ble/scan.py` + time-sliced main loop; metrics in serial log only | Phase 1 |
+| 3 | Add BLE fields to submit payload; server stores and `/check` displays band | Phase 2 |
+| 4 | Occupancy model v1 (thresholds); lab tuning | Phase 3 |
+| 5 | CO₂ fusion rules on server (rising presence + CO₂ → event hint) | Feature 2 |
+| 6 | OTA deploy `ble/` to field; optional dedicated beacon filter | Step 1 |
+| 7 | HVAC / airflow integration hooks (webhook or API) | ops requirements |
+
+### Risks and constraints
+
+- **WiFi gap during scan** — server sees `data_age_s` spike; don’t treat as offline if within expected scan schedule.
+- **False “event”** — dense RF environments (neighboring businesses) may inflate counts; per-site calibration required.
+- **Beacons vs phones** — mixing modes in one score can confuse; keep sub-modes separate in payload.
+- **Legal / signage** — aggregate sensing only; document data handling in README when feature ships.
+
+### Out of scope (phase 1)
+
+- BLE connections / GATT pairing (scan-only)
+- Individual identification or long-term MAC tracking
+- Bluetooth Classic inquiry
+- Continuous BLE while WiFi is active
+
+---
+
 ## Future considerations (not yet planned)
 
 These fit the same architecture but are not scheduled:
@@ -486,8 +774,12 @@ These fit the same architecture but are not scheduled:
 
 ## Feature summary
 
-| Order | Feature | Branch | Pico | Server | Field-safe parallel deploy |
-|-------|---------|--------|------|--------|----------------------------|
-| 1 | WiFi OTA (`.py` updates) | `feature/pico-ota` | Update client + modular code | Manifest + artifact hosting | Yes — `:5001` + lab Pico |
-| 2 | I2C sensor identification | `feature/i2c-sensor-discovery` | Bus scan, drivers, `lib/` pre-load + OTA | Store/display `attached_sensors`; driver registry | Yes — after OTA for driver/library rollout |
-| 3 | Measurement integrity | `feature/measurement-integrity` | GPIO heater, impulse or PRBS + cross-corr | Display/store integrity metrics on `/check` | Yes — lab Pico first; brief heater tests |
+Aligned with [Implementation order (OTA-first)](#implementation-order-ota-first):
+
+| Step | Feature | Branch | Pico | Server | Field rollout gate |
+|------|---------|--------|------|--------|-------------------|
+| 0 | USB bootstrap | — | BT UF2, secrets, OTA client once | — | Before install |
+| 1 | WiFi OTA | `feature/pico-ota` | Update client + phased `main.py` | Manifest + artifacts | Enables Steps 2–4 |
+| 2 | I2C sensor ID | `feature/i2c-sensor-discovery` | Scan, `sensors/`, `lib/` OTA | Driver registry | Step 1 |
+| 3 | Measurement integrity | `feature/measurement-integrity` | GPIO heater, impulse / PRBS | `/check` metrics | Step 1 |
+| 4 | BLE occupancy | `feature/ble-occupancy` | Time-sliced scan, `ble/` OTA | Occupancy + CO₂ fusion | Step 0 + Step 1 |
