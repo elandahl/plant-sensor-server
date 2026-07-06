@@ -207,12 +207,18 @@ HTML table of all known nodes and their last readings.
 ```
 plant-sensor-server/
 ├── app.py                 # Flask server (host computer)
+├── docs/
+│   └── ROADMAP.md         # Architecture and planned features (OTA, sensor discovery)
 ├── pico/
 │   ├── main.py            # MicroPython firmware (Pico W)
 │   └── secrets_template.py
 ├── data/                  # Daily CSV logs (created at runtime, gitignored)
 └── README.md
 ```
+
+## Development roadmap
+
+Planned features, deployment strategy (production `main` alongside feature branches), and phased designs for **WiFi OTA updates** and **I2C sensor identification** (Adafruit breakouts) are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
