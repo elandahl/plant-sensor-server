@@ -53,7 +53,7 @@ The AHT20 is a low-cost environmental sensor, not a soil-moisture probe. It meas
 - **Greenhouse or grow-tent monitoring** — correlate temperature swings with watering or ventilation schedules.
 - **Multi-plant setups** — deploy several Pico W nodes (different `node_id` values) to compare microclimates near windows, radiators, or grow lights.
 
-The server stores an `integrity` block with each reading (currently a placeholder `green` state from the Pico). That field is reserved for future logic such as stale-data detection or sensor fault scoring.
+The server stores an `integrity` block with each reading (currently a placeholder `green` state from the Pico). Planned **measurement integrity** tests use a GPIO-driven heating resistor and thermal impulse response (or PRBS cross-correlation) to verify the sensor responds to physical stimulus — see [docs/ROADMAP.md](docs/ROADMAP.md) Feature 3.
 
 ## MicroPython on Pico W (not CircuitPython, not Pico 2)
 

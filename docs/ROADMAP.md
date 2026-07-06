@@ -71,6 +71,7 @@ Run two server processes on different ports until a feature is proven, then merg
 |---------|------------------|
 | OTA updates | `feature/pico-ota` |
 | I2C sensor identification | `feature/i2c-sensor-discovery` |
+| Measurement integrity | `feature/measurement-integrity` |
 
 ---
 
@@ -311,6 +312,166 @@ Server should store `attached_sensors` in CSV or a structured column for history
 
 ---
 
+## Feature 3: Measurement integrity (thermal system ID: impulse response or PRBS cross-correlation)
+
+**Branch:** `feature/measurement-integrity`  
+**Status:** Planned — next feature after I2C sensor identification  
+**Scope:** Replace the placeholder `integrity` block with a real **sensor health check** that verifies the temperature channel responds to a known physical stimulus. Phase 1 uses a **GPIO-driven heating resistor** placed near the temperature sensor; excitation is either a **time-domain impulse** or **PRBS (pseudo-random binary sequence)** with **cross-correlation** to recover the thermal impulse response.
+
+Today, `pico/main.py` always reports `"state": "green"` with no verification. A stuck, disconnected, or drifting sensor can still produce plausible-looking readings. Integrity testing injects a controlled heat input and checks that the sensor’s temperature trace matches expected dynamics.
+
+### Concept
+
+```
+                    ┌─────────────────┐
+  GPIO ──▶ driver ──▶ heating resistor ──▶ air / board near sensor
+                              │
+                              ▼
+                    temperature sensor (I2C)
+                              │
+                              ▼
+              compare excitation vs response → integrity score
+```
+
+The heater is a **known input** \( u(t) \) (0/1 or PWM). The sensor output is \( y(t) \) (temperature vs time). A healthy sensor shows a **causal, correlated** response; a fault shows flat line, wrong delay, wrong gain, or no coupling.
+
+### Phase 1 excitation modes (implement one first, support both later)
+
+| Mode | Heater drive \( u(t) \) | Analysis | Pros | Cons |
+|------|-------------------------|----------|------|------|
+| **Impulse response** | Single pulse (or short burst), then off | Measure rise time, peak ΔT, time constant τ from step/impulse | Simple, easy to interpret on server | SNR low for small ΔT; ambient drift during test |
+| **PRBS + cross-correlation** | Binary PRBS on GPIO for duration \( T \) | \( h[k] = r_{uy}[k] \); peak location, area, shape vs baseline | Averages out noise; better SNR for small heaters | More RAM/CPU; longer test window; needs aligned sampling |
+
+**Impulse flow (sketch):**
+
+1. Record baseline temperature for \( T_0 \) seconds (heater off).
+2. Assert heater ON for \( T_{\mathrm{pulse}} \) (ms–s, tuned to safe power).
+3. Heater OFF; sample temperature at fixed Δt until response settles.
+4. Fit or threshold: ΔT\_max, delay to 63% (τ), monotonicity.
+5. Map metrics → `integrity.state` (`green` / `yellow` / `red`) and `integrity.score`.
+
+**PRBS flow (sketch):**
+
+1. Generate maximal-length or Gold-code **PRBS** at chip period \( T_c \) (e.g. 100–500 ms).
+2. Drive heater GPIO with PRBS; sample temperature every \( T_c \) (or faster, then decimate).
+3. Compute cross-correlation \( r_{uy}[k] = \sum_n (u[n]-\bar u)(y[n+k]-\bar y) \) (or normalized variant).
+4. Peak amplitude, peak delay, and side-lobe ratio vs stored baseline → score.
+5. Optional: upload compact summary (peak, lag, correlation coefficient), not full raw vectors, to save bandwidth.
+
+Choose **impulse** for the first lab prototype if RAM is tight; add **PRBS** when noise rejection matters in the field.
+
+### Hardware (phase 1)
+
+| Component | Role |
+|-----------|------|
+| **GPIO pin** (e.g. GP15 — TBD, avoid I2C GP4/GP5) | Digital drive to heater circuit |
+| **N-channel MOSFET or NPN + base resistor** | Switch heater current; do not drive resistor directly from GPIO |
+| **Power resistor** (e.g. 10–47 Ω, rated wattage) | Localized heat source near temp sensor die / breakout |
+| **Separate supply or USB rail** | Heater current may exceed safe GPIO load; size for duty cycle |
+
+**Safety constraints (firmware-enforced):**
+
+- Maximum pulse duration and maximum duty cycle per test.
+- Cooldown period between integrity runs.
+- Abort if baseline temperature exceeds a ceiling (avoid runaway in hot enclosure).
+- Heater off on any exception before WiFi or long blocking work.
+
+Mechanical: resistor physically close to the **same** temperature sensor used for integrity (initially AHT20; later the designated primary temp channel from Feature 2).
+
+### Pico software sketch
+
+```
+pico/
+├── integrity/
+│   ├── __init__.py
+│   ├── heater.py          # GPIO on/off, optional PWM, safety limits
+│   ├── impulse.py         # impulse test sequence + metrics
+│   ├── prbs.py            # PRBS generation, cross-correlation (may need lib/ or ulab if added)
+│   └── scoring.py         # metrics → state, score, mode
+└── main.py                # normal read loop; periodic integrity schedule
+```
+
+**Scheduling:** Integrity tests should **not** run every 60 s submit cycle. Suggested default: once per hour or on server command (future remote config). Normal submits carry the **last** integrity result until a new test completes.
+
+**Sampling:** During an active test, temporarily increase temperature read rate (e.g. 2–10 Hz) using the existing AHT20 driver; return to slow polling afterward.
+
+### `integrity` payload (replaces placeholder)
+
+```json
+{
+  "integrity": {
+    "state": "green",
+    "score": 0.92,
+    "mode": "prbs-crosscorr",
+    "test_timestamp_node": "2026-07-06T14:30:00",
+    "metrics": {
+      "delta_t_max_f": 0.8,
+      "peak_lag_s": 12.5,
+      "corr_peak": 0.87,
+      "baseline_temp_f": 71.2
+    },
+    "excitation": {
+      "type": "prbs",
+      "length_bits": 127,
+      "chip_period_ms": 200
+    }
+  }
+}
+```
+
+For impulse mode, `mode` is `impulse-response` and `metrics` holds e.g. `tau_s`, `delta_t_max_f`, `rise_monotonic`.
+
+Server and `/check` already read `integrity.state`; extend display for score, mode, last test age, and key metrics.
+
+### Server changes
+
+| Change | Purpose |
+|--------|---------|
+| Store full `integrity` JSON in CSV (already via `integrity_json`) | History and trending |
+| `/check` columns or detail row | Show state, score, mode, last test time |
+| Optional baseline registry per `node_id` | Compare current PRBS peak shape to commissioning baseline |
+| Alert rules (later) | `red` or score below threshold → notification |
+
+Heavy correlation analysis can stay **on the Pico** in phase 1; server receives summaries only. Optional later: upload raw traces to server for offline analysis (larger payloads).
+
+### Dependencies on other features
+
+| Dependency | Reason |
+|------------|--------|
+| Feature 2 (sensor ID) | Know which device is the primary temperature channel for scoring |
+| Feature 1 (OTA) | Ship `integrity/` module and algorithm tweaks without USB |
+| Modular `sensors/` | Fast repeated reads during test window |
+
+Integrity phase 1 can start with **hardcoded AHT20** on the lab bench before Feature 2 is complete.
+
+### Rollout phases
+
+| Phase | Work | Depends on |
+|-------|------|------------|
+| 1 | Bench wiring: GPIO + MOSFET + resistor; `heater.py` with limits | — |
+| 2 | Impulse test + on-Pico metrics + real `integrity` in submit payload | Phase 1 |
+| 3 | Server `/check` shows integrity score, mode, test age | Phase 2 |
+| 4 | PRBS generator + cross-correlation path; compare vs impulse in lab | Phase 2 |
+| 5 | Scheduled tests + cooldown; optional server-triggered test (remote config) | Phase 3 |
+| 6 | OTA rollout of `integrity/` to field; baseline capture at install | Feature 1 |
+
+### Risks and constraints
+
+- **Small ΔT** — low power/heater may produce subtle response; PRBS helps; avoid false reds from noise.
+- **Ambient coupling** — sunlight, HVAC, or watering swamps the test; schedule tests or detect unstable baseline.
+- **Humidity cross-talk** — heating affects RH; integrity focuses on **temperature** response; document expected RH drift.
+- **RAM / CPU** — PRBS buffer length limits; prefer fixed-length sequences (e.g. 7- or 127-bit LFSR); avoid large float arrays if possible (fixed-point OK).
+- **WiFi during test** — defer POST until test completes; do not heat during OTA flash.
+- **Multi-sensor nodes** — define which sensor must respond; others reported but not scored in phase 1.
+
+### Out of scope (phase 1)
+
+- Closed-loop PID temperature control (open-loop pulse/PRBS only).
+- Integrity via non-thermal actuators (fan, humidifier) — future phases.
+- Full transfer-function upload and server-side system ID (summaries only initially).
+
+---
+
 ## Future considerations (not yet planned)
 
 These fit the same architecture but are not scheduled:
@@ -329,3 +490,4 @@ These fit the same architecture but are not scheduled:
 |-------|---------|--------|------|--------|----------------------------|
 | 1 | WiFi OTA (`.py` updates) | `feature/pico-ota` | Update client + modular code | Manifest + artifact hosting | Yes — `:5001` + lab Pico |
 | 2 | I2C sensor identification | `feature/i2c-sensor-discovery` | Bus scan, drivers, `lib/` pre-load + OTA | Store/display `attached_sensors`; driver registry | Yes — after OTA for driver/library rollout |
+| 3 | Measurement integrity | `feature/measurement-integrity` | GPIO heater, impulse or PRBS + cross-corr | Display/store integrity metrics on `/check` | Yes — lab Pico first; brief heater tests |
