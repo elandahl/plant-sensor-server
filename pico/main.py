@@ -7,8 +7,10 @@ import secrets
 import update
 import i2c_bus
 import discovery
+import schedule
+import ble.scan as ble_scan
 
-FIRMWARE_VERSION = "pico-sensors-0.3"
+FIRMWARE_VERSION = "pico-sensors-0.4"
 
 SERVER_URL = secrets.SERVER_URL
 SERVER_BASE = SERVER_URL.rsplit("/api/", 1)[0]
@@ -24,25 +26,36 @@ last_scan_at = 0
 last_inventory_sig = ""
 
 
-def connect_wifi(max_attempts=3):
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
+def wlan():
+    return network.WLAN(network.STA_IF)
 
-    if wlan.isconnected():
+
+def disconnect_wifi():
+    radio = wlan()
+    if radio.isconnected():
+        radio.disconnect()
+    radio.active(False)
+
+
+def connect_wifi(max_attempts=3):
+    radio = wlan()
+    radio.active(True)
+
+    if radio.isconnected():
         return True
 
     for attempt in range(1, max_attempts + 1):
         print("WiFi attempt", attempt)
-        wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
+        radio.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
 
         start = time.time()
-        while not wlan.isconnected():
+        while not radio.isconnected():
             if time.time() - start > 15:
                 break
             time.sleep(1)
 
-        if wlan.isconnected():
-            print("WiFi connected:", wlan.ifconfig())
+        if radio.isconnected():
+            print("WiFi connected:", radio.ifconfig())
             return True
 
         backoff = attempt * 5
@@ -50,6 +63,25 @@ def connect_wifi(max_attempts=3):
         time.sleep(backoff)
 
     return False
+
+
+def maybe_ble_scan():
+    now = time.time()
+    if not schedule.should_ble_scan(now):
+        return None, None
+
+    try:
+        disconnect_wifi()
+        result = ble_scan.run(schedule.ble_scan_duration_s())
+        readings = result.get("readings", {})
+        meta = result.get("meta")
+        print("BLE scan:", readings)
+        return readings, meta
+    except Exception as e:
+        print("BLE scan failed:", e)
+        return None, None
+    finally:
+        wlan().active(True)
 
 
 def maybe_rescan():
@@ -76,16 +108,23 @@ def maybe_rescan():
     return discovery.merge_sensor_errors(scan_errors, change_errors)
 
 
-def build_payload(readings, sensor_errors):
+def build_payload(readings, sensor_errors, ble_readings=None, ble_scan_meta=None):
+    merged = dict(readings)
+    if ble_readings:
+        merged.update(ble_readings)
+
     integrity = discovery.integrity_from_errors(sensor_errors)
-    return {
+    payload = {
         "node_id": NODE_ID,
         "firmware_version": FIRMWARE_VERSION,
         "timestamp_node": "",
         "attached_sensors": attached_sensors,
-        "readings": readings,
+        "readings": merged,
         "integrity": integrity,
     }
+    if ble_scan_meta:
+        payload["ble_scan"] = ble_scan_meta
+    return payload
 
 
 def post_payload(payload, max_attempts=3):
@@ -119,6 +158,8 @@ def post_payload(payload, max_attempts=3):
 while True:
     led.on()
 
+    ble_readings, ble_scan_meta = maybe_ble_scan()
+
     if connect_wifi():
         if update.check_and_apply(SERVER_BASE, FIRMWARE_VERSION):
             reset()
@@ -130,7 +171,7 @@ while True:
 
             print("T:", readings.get("temperature_F"), "H:", readings.get("humidity_percent"))
 
-            payload = build_payload(readings, sensor_errors)
+            payload = build_payload(readings, sensor_errors, ble_readings, ble_scan_meta)
             ok = post_payload(payload)
 
             if not ok:

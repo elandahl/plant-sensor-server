@@ -152,6 +152,7 @@ def submit():
         "readings": data.get("readings", {}),
         "integrity": data.get("integrity", {}),
         "attached_sensors": data.get("attached_sensors", []),
+        "ble_scan": data.get("ble_scan", {}),
     }
 
     latest[node_id] = record
@@ -207,6 +208,7 @@ def api_latest():
             "readings": record.get("readings", {}),
             "integrity": record.get("integrity", {}),
             "attached_sensors": record.get("attached_sensors", []),
+            "ble_scan": record.get("ble_scan", {}),
             "data_age_s": age_s
         }
 
@@ -241,6 +243,7 @@ def check():
         temp = primary_metric(readings, "temperature_F")
         humidity = primary_metric(readings, "humidity_percent")
         co2 = primary_metric(readings, "co2_ppm")
+        occupancy = primary_metric(readings, "occupancy_band")
         state = integrity.get("state", "")
         sensors = sensor_summary(attached_sensors)
 
@@ -255,6 +258,7 @@ def check():
             <td>{temp}</td>
             <td>{humidity}</td>
             <td>{co2}</td>
+            <td>{occupancy}</td>
             <td>{state}</td>
         </tr>
         """
@@ -294,6 +298,7 @@ def check():
                 <th>Temp F</th>
                 <th>Humidity %</th>
                 <th>eCO2 ppm</th>
+                <th>Occupancy</th>
                 <th>Integrity</th>
             </tr>
             {rows}
