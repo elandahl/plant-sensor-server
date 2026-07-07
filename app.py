@@ -541,22 +541,26 @@ def plot_page():
         for (const entry of Object.values(payload.series)) {
             datasets.push({
                 label: entry.node + " \u2022 " + entry.field,
-                data: entry.points.map(p => ({ x: p.t, y: p.v })),
+                data: entry.points.map(p => ({ x: Date.parse(p.t), y: p.v })),
                 borderColor: COLORS[i % COLORS.length],
                 backgroundColor: COLORS[i % COLORS.length],
                 tension: 0.1,
-                pointRadius: 2,
+                pointRadius: 0,
                 showLine: true,
                 yAxisID: useMultiAxis ? axisId(entry.field) : "y",
             });
             i += 1;
         }
 
+        const fmtTime = ms => new Date(ms).toISOString().slice(11, 16);
         const scales = {
             x: {
-                type: "category",
+                type: "linear",
                 title: { display: true, text: "Time (UTC)" },
-                ticks: { maxTicksLimit: 12 },
+                ticks: {
+                    maxTicksLimit: 12,
+                    callback: v => fmtTime(v),
+                },
             },
         };
         if (useMultiAxis) {
@@ -579,7 +583,16 @@ def plot_page():
             options: {
                 parsing: false,
                 scales: scales,
-                plugins: { legend: { display: true } },
+                plugins: {
+                    legend: { display: true },
+                    tooltip: {
+                        callbacks: {
+                            title: items => items.length
+                                ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + " UTC"
+                                : "",
+                        },
+                    },
+                },
             },
         });
     }
