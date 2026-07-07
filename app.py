@@ -350,10 +350,14 @@ def plot_series():
         return jsonify({"status": "error", "message": "Missing nodes"}), 400
 
     if mode == "time":
-        field = request.args.get("field", "")
-        if not field:
+        fields = _parse_node_list(request.args.get("fields", ""))
+        if not fields:
+            single = request.args.get("field", "")
+            if single:
+                fields = [single]
+        if not fields:
             return jsonify({"status": "error", "message": "Missing field"}), 400
-        return jsonify(history.series_time(date_str, node_ids, field))
+        return jsonify(history.series_time(date_str, node_ids, fields))
 
     if mode == "xy":
         x_field = request.args.get("x", "")
@@ -406,7 +410,8 @@ def plot_page():
         <label><input type="radio" name="mode" value="time" checked> vs time</label>
         <label><input type="radio" name="mode" value="xy"> X vs Y</label>
         <div id="time-fields" style="margin-top:0.75em">
-            <label>Field <select id="field-select"></select></label>
+            <div style="margin-bottom:0.35em">Fields (select one or more):</div>
+            <div id="field-list" class="nodes"></div>
         </div>
         <div id="xy-fields" style="margin-top:0.75em; display:none">
             <label>X <select id="x-select"></select></label>
@@ -423,7 +428,7 @@ def plot_page():
     <script>
     const dateSelect = document.getElementById("date-select");
     const nodeList = document.getElementById("node-list");
-    const fieldSelect = document.getElementById("field-select");
+    const fieldList = document.getElementById("field-list");
     const xSelect = document.getElementById("x-select");
     const ySelect = document.getElementById("y-select");
     const metaInfo = document.getElementById("meta-info");
@@ -454,6 +459,10 @@ def plot_page():
 
     function selectedNodes() {
         return Array.from(nodeList.querySelectorAll("input:checked")).map(cb => cb.value);
+    }
+
+    function selectedFields() {
+        return Array.from(fieldList.querySelectorAll("input:checked")).map(cb => cb.value);
     }
 
     function plotMode() {
@@ -501,7 +510,18 @@ def plot_page():
             nodeList.appendChild(label);
         }
 
-        fillSelect(fieldSelect, meta.fields, "temperature_F");
+        fieldList.innerHTML = "";
+        for (const field of meta.fields) {
+            const label = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = field;
+            cb.checked = field === "temperature_F";
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(" " + field));
+            fieldList.appendChild(label);
+        }
+
         fillSelect(xSelect, meta.fields, "ble_devices_close");
         fillSelect(ySelect, meta.fields, "co2_ppm");
         setStatus("Ready. Select nodes and click Plot.");
@@ -513,33 +533,52 @@ def plot_page():
 
     function buildTimeChart(payload) {
         const datasets = [];
+        const fields = payload.fields || [];
+        const useMultiAxis = fields.length > 1;
+        const axisId = f => "y_" + f;
+
         let i = 0;
-        for (const [node, points] of Object.entries(payload.series)) {
+        for (const entry of Object.values(payload.series)) {
             datasets.push({
-                label: node,
-                data: points.map(p => ({ x: p.t, y: p.v })),
+                label: entry.node + " \u2022 " + entry.field,
+                data: entry.points.map(p => ({ x: p.t, y: p.v })),
                 borderColor: COLORS[i % COLORS.length],
                 backgroundColor: COLORS[i % COLORS.length],
                 tension: 0.1,
                 pointRadius: 2,
                 showLine: true,
+                yAxisID: useMultiAxis ? axisId(entry.field) : "y",
             });
             i += 1;
         }
+
+        const scales = {
+            x: {
+                type: "category",
+                title: { display: true, text: "Time (UTC)" },
+                ticks: { maxTicksLimit: 12 },
+            },
+        };
+        if (useMultiAxis) {
+            fields.forEach((f, idx) => {
+                scales[axisId(f)] = {
+                    type: "linear",
+                    position: idx % 2 === 0 ? "left" : "right",
+                    title: { display: true, text: f },
+                    grid: { drawOnChartArea: idx === 0 },
+                };
+            });
+        } else {
+            scales.y = { title: { display: true, text: fields[0] || "" } };
+        }
+
         destroyChart();
         chart = new Chart(document.getElementById("chart"), {
             type: "line",
             data: { datasets },
             options: {
                 parsing: false,
-                scales: {
-                    x: {
-                        type: "category",
-                        title: { display: true, text: "Time (UTC)" },
-                        ticks: { maxTicksLimit: 12 },
-                    },
-                    y: { title: { display: true, text: payload.field } },
-                },
+                scales: scales,
                 plugins: { legend: { display: true } },
             },
         });
@@ -585,7 +624,12 @@ def plot_page():
             + "&nodes=" + encodeURIComponent(nodes.join(","))
             + "&mode=" + mode;
         if (mode === "time") {
-            url += "&field=" + encodeURIComponent(fieldSelect.value);
+            const fields = selectedFields();
+            if (fields.length === 0) {
+                setStatus("Select at least one field.");
+                return;
+            }
+            url += "&fields=" + encodeURIComponent(fields.join(","));
         } else {
             url += "&x=" + encodeURIComponent(xSelect.value)
                 + "&y=" + encodeURIComponent(ySelect.value);
@@ -598,7 +642,9 @@ def plot_page():
             return;
         }
         let total = 0;
-        for (const pts of Object.values(payload.series)) total += pts.length;
+        for (const entry of Object.values(payload.series)) {
+            total += mode === "time" ? entry.points.length : entry.length;
+        }
         if (total === 0) {
             setStatus("No numeric data for selection.");
             destroyChart();
