@@ -10,7 +10,7 @@ import discovery
 import schedule
 import ble.scan as ble_scan
 
-FIRMWARE_VERSION = "pico-sensors-0.5"
+FIRMWARE_VERSION = "pico-sensors-0.4"
 
 SERVER_URL = secrets.SERVER_URL
 SERVER_BASE = SERVER_URL.rsplit("/api/", 1)[0]
