@@ -243,7 +243,8 @@ def check():
         temp = primary_metric(readings, "temperature_F")
         humidity = primary_metric(readings, "humidity_percent")
         co2 = primary_metric(readings, "co2_ppm")
-        occupancy = primary_metric(readings, "occupancy_band")
+        ble_seen = primary_metric(readings, "ble_devices_seen")
+        ble_close = primary_metric(readings, "ble_devices_close")
         state = integrity.get("state", "")
         sensors = sensor_summary(attached_sensors)
 
@@ -258,7 +259,8 @@ def check():
             <td>{temp}</td>
             <td>{humidity}</td>
             <td>{co2}</td>
-            <td>{occupancy}</td>
+            <td>{ble_seen}</td>
+            <td>{ble_close}</td>
             <td>{state}</td>
         </tr>
         """
@@ -298,7 +300,8 @@ def check():
                 <th>Temp F</th>
                 <th>Humidity %</th>
                 <th>eCO2 ppm</th>
-                <th>Occupancy</th>
+                <th>BLE seen</th>
+                <th>BLE close</th>
                 <th>Integrity</th>
             </tr>
             {rows}
