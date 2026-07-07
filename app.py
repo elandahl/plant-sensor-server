@@ -86,7 +86,8 @@ def append_csv(record):
                 "node_id",
                 "firmware_version",
                 "readings_json",
-                "integrity_json"
+                "integrity_json",
+                "attached_sensors_json",
             ])
 
         writer.writerow([
@@ -94,8 +95,29 @@ def append_csv(record):
             record["node_id"],
             record.get("firmware_version", ""),
             json.dumps(record.get("readings", {})),
-            json.dumps(record.get("integrity", {}))
+            json.dumps(record.get("integrity", {})),
+            json.dumps(record.get("attached_sensors", [])),
         ])
+
+
+def sensor_summary(attached_sensors):
+    if not attached_sensors:
+        return ""
+    labels = []
+    for entry in attached_sensors:
+        label = entry.get("label") or entry.get("driver") or "?"
+        if entry.get("driver") == "unknown":
+            labels.append("unknown@" + entry.get("address", "?"))
+        else:
+            labels.append(label)
+    return ", ".join(labels)
+
+
+def primary_metric(readings, key):
+    value = readings.get(key)
+    if value is None or value == "":
+        return ""
+    return value
 
 
 @app.route("/api/health", methods=["GET"])
@@ -128,7 +150,8 @@ def submit():
         "firmware_version": data.get("firmware_version", ""),
         "timestamp_node": data.get("timestamp_node", ""),
         "readings": data.get("readings", {}),
-        "integrity": data.get("integrity", {})
+        "integrity": data.get("integrity", {}),
+        "attached_sensors": data.get("attached_sensors", []),
     }
 
     latest[node_id] = record
@@ -183,6 +206,7 @@ def api_latest():
             "firmware_version": record.get("firmware_version", ""),
             "readings": record.get("readings", {}),
             "integrity": record.get("integrity", {}),
+            "attached_sensors": record.get("attached_sensors", []),
             "data_age_s": age_s
         }
 
@@ -212,10 +236,13 @@ def check():
 
         readings = record.get("readings", {})
         integrity = record.get("integrity", {})
+        attached_sensors = record.get("attached_sensors", [])
 
-        temp = readings.get("temperature_F", "")
-        humidity = readings.get("humidity_percent", "")
+        temp = primary_metric(readings, "temperature_F")
+        humidity = primary_metric(readings, "humidity_percent")
+        co2 = primary_metric(readings, "co2_ppm")
         state = integrity.get("state", "")
+        sensors = sensor_summary(attached_sensors)
 
         last_seen = t.astimezone().strftime("%H:%M:%S")
 
@@ -224,8 +251,10 @@ def check():
             <td>{node_id}</td>
             <td>{last_seen}</td>
             <td>{age_s} s</td>
+            <td>{sensors}</td>
             <td>{temp}</td>
             <td>{humidity}</td>
+            <td>{co2}</td>
             <td>{state}</td>
         </tr>
         """
@@ -261,8 +290,10 @@ def check():
                 <th>Node</th>
                 <th>Last Seen</th>
                 <th>Age</th>
+                <th>Sensors</th>
                 <th>Temp F</th>
                 <th>Humidity %</th>
+                <th>eCO2 ppm</th>
                 <th>Integrity</th>
             </tr>
             {rows}

@@ -8,7 +8,7 @@ import update
 import i2c_bus
 import discovery
 
-FIRMWARE_VERSION = "pico-sensors-0.3"
+FIRMWARE_VERSION = "pico-sensors-0.2"
 
 SERVER_URL = secrets.SERVER_URL
 SERVER_BASE = SERVER_URL.rsplit("/api/", 1)[0]
