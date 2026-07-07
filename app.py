@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, abort
 from datetime import datetime, timezone
 import csv
 import json
@@ -7,9 +7,57 @@ import os
 app = Flask(__name__)
 
 DATA_DIR = "data"
+FIRMWARE_DIR = "firmware/releases"
+FIRMWARE_LATEST_FILE = "firmware/LATEST"
 latest = {}
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def read_latest_release_name():
+    try:
+        with open(FIRMWARE_LATEST_FILE, "r") as f:
+            name = f.read().strip()
+            if name:
+                return name
+    except OSError:
+        pass
+    return None
+
+
+def read_manifest(release_name=None):
+    release_name = release_name or read_latest_release_name()
+    if not release_name:
+        return None
+    manifest_path = os.path.join(FIRMWARE_DIR, release_name, "manifest.json")
+    try:
+        with open(manifest_path, "r") as f:
+            return json.load(f)
+    except OSError:
+        return None
+
+
+def release_directory(release_name=None):
+    release_name = release_name or read_latest_release_name()
+    if not release_name:
+        return None
+    path = os.path.join(FIRMWARE_DIR, release_name)
+    if not os.path.isdir(path):
+        return None
+    return path
+
+
+def safe_release_file_path(release_dir, filepath):
+    normalized = os.path.normpath(filepath)
+    if normalized.startswith("..") or os.path.isabs(normalized):
+        return None
+    release_abs = os.path.abspath(release_dir)
+    full_path = os.path.abspath(os.path.join(release_abs, normalized))
+    if os.path.commonpath([release_abs, full_path]) != release_abs:
+        return None
+    if not os.path.isfile(full_path):
+        return None
+    return full_path
 
 
 def now_utc():
@@ -86,7 +134,36 @@ def submit():
     latest[node_id] = record
     append_csv(record)
 
-    return jsonify({"status": "received"})
+    response = {"status": "received"}
+    manifest = read_manifest()
+    firmware_version = data.get("firmware_version", "")
+    if manifest and firmware_version and firmware_version != manifest.get("version"):
+        response["update_available"] = True
+        response["manifest_url"] = request.host_url.rstrip("/") + "/api/firmware/manifest"
+        response["target_version"] = manifest.get("version")
+
+    return jsonify(response)
+
+
+@app.route("/api/firmware/manifest", methods=["GET"])
+def firmware_manifest():
+    manifest = read_manifest()
+    if manifest is None:
+        return jsonify({"status": "error", "message": "No firmware release configured"}), 404
+    return jsonify(manifest)
+
+
+@app.route("/api/firmware/file/<path:filepath>", methods=["GET"])
+def firmware_file(filepath):
+    release_dir = release_directory()
+    if release_dir is None:
+        abort(404)
+    full_path = safe_release_file_path(release_dir, filepath)
+    if full_path is None:
+        abort(404)
+    directory = os.path.dirname(full_path)
+    filename = os.path.basename(full_path)
+    return send_from_directory(directory, filename, as_attachment=False)
 
 
 @app.route("/api/latest", methods=["GET"])

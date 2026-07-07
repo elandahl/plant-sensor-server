@@ -1,0 +1,15 @@
+{
+  "version": "pico-aht20-0.4-test",
+  "files": [
+    {
+      "path": "main.py",
+      "sha256": "9d3eef7372a51c4339dffaf1ec5dfe5eba7d0f0d1d164a2e8c0b97ff00082518",
+      "size": 3250
+    },
+    {
+      "path": "update.py",
+      "sha256": "e1cb85e4e5707d650bb241112bc32b5e6be6e14cd0fa79b38c013ad8c36197bf",
+      "size": 3225
+    }
+  ]
+}

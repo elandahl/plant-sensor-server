@@ -212,7 +212,8 @@ HTML table of all known nodes and their last readings.
 plant-sensor-server/
 ├── app.py                 # Flask server (host computer)
 ├── docs/
-│   └── ROADMAP.md         # Implementation order, OTA strategy, feature plans
+│   ├── ROADMAP.md         # Implementation order, OTA strategy, feature plans
+│   └── OTA_TEST.md        # Lab OTA smoke test (integrity yellow)
 ├── pico/
 │   ├── main.py            # MicroPython firmware (Pico W)
 │   └── secrets_template.py
@@ -233,6 +234,8 @@ Full plans live in [docs/ROADMAP.md](docs/ROADMAP.md). Start with **[Implementat
 | **4** | BLE occupancy estimation — presence for events, airflow, heat-load anticipation |
 
 **Today’s field nodes** run Step 0 partially (UF2 + current `main.py`) without OTA yet. New Picos should still use a **Bluetooth-capable UF2** at first flash so Steps 1–4 never require a USB recall.
+
+Lab OTA smoke test (integrity yellow): [docs/OTA_TEST.md](docs/OTA_TEST.md).
 
 ## License
 

@@ -6,7 +6,7 @@ import json
 import secrets
 import update
 
-FIRMWARE_VERSION = "pico-aht20-0.3"
+FIRMWARE_VERSION = "pico-aht20-0.4-test"
 
 SERVER_URL = secrets.SERVER_URL
 SERVER_BASE = SERVER_URL.rsplit("/api/", 1)[0]
@@ -76,9 +76,9 @@ def build_payload(temp, humidity):
             "humidity_percent": humidity
         },
         "integrity": {
-            "state": "green",
-            "score": 1.0,
-            "mode": "aht20-loop-retry"
+            "state": "yellow",
+            "score": 0.5,
+            "mode": "ota-test"
         }
     }
 
