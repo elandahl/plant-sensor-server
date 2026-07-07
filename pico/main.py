@@ -1,22 +1,27 @@
-from machine import Pin, I2C, reset
+from machine import Pin, reset
 import network
 import time
 import urequests
 import json
 import secrets
 import update
+import i2c_bus
+import discovery
 
-FIRMWARE_VERSION = "pico-aht20-0.3"
+FIRMWARE_VERSION = "pico-sensors-0.1"
 
 SERVER_URL = secrets.SERVER_URL
 SERVER_BASE = SERVER_URL.rsplit("/api/", 1)[0]
 NODE_ID = secrets.NODE_ID
 
-AHT20_ADDR = 0x38
 READ_INTERVAL_S = 60
 
 led = Pin("LED", Pin.OUT)
-i2c = I2C(0, sda=Pin(4), scl=Pin(5), freq=100000)
+i2c = i2c_bus.create_bus()
+
+attached_sensors = []
+last_scan_at = 0
+last_inventory_sig = ""
 
 
 def connect_wifi(max_attempts=3):
@@ -47,39 +52,39 @@ def connect_wifi(max_attempts=3):
     return False
 
 
-def read_aht20():
-    i2c.writeto(AHT20_ADDR, b'\xBE\x08\x00')
-    time.sleep(0.01)
+def maybe_rescan():
+    global attached_sensors, last_scan_at, last_inventory_sig
 
-    i2c.writeto(AHT20_ADDR, b'\xAC\x33\x00')
-    time.sleep(0.08)
+    now = time.time()
+    if attached_sensors and (now - last_scan_at) < discovery.RESCAN_INTERVAL_S:
+        return []
 
-    data = i2c.readfrom(AHT20_ADDR, 6)
+    attached_sensors, scan_errors = discovery.discover(i2c)
+    last_scan_at = now
 
-    raw_humidity = ((data[1] << 16) | (data[2] << 8) | data[3]) >> 4
-    humidity = raw_humidity * 100 / 1048576
+    sig = discovery.inventory_signature(attached_sensors)
+    change_errors = []
+    if last_inventory_sig and sig != last_inventory_sig:
+        print("Inventory changed:", last_inventory_sig, "->", sig)
+        change_errors.append({
+            "code": "inventory_changed",
+            "detail": last_inventory_sig + " -> " + sig,
+        })
+    last_inventory_sig = sig
 
-    raw_temp = ((data[3] & 0x0F) << 16) | (data[4] << 8) | data[5]
-    temperature_C = raw_temp * 200 / 1048576 - 50
-    temperature_F = temperature_C * 9 / 5 + 32
-
-    return temperature_F, humidity
+    print("Attached sensors:", attached_sensors)
+    return discovery.merge_sensor_errors(scan_errors, change_errors)
 
 
-def build_payload(temp, humidity):
+def build_payload(readings, sensor_errors):
+    integrity = discovery.integrity_from_errors(sensor_errors)
     return {
         "node_id": NODE_ID,
         "firmware_version": FIRMWARE_VERSION,
         "timestamp_node": "",
-        "readings": {
-            "temperature_F": temp,
-            "humidity_percent": humidity
-        },
-        "integrity": {
-            "state": "green",
-            "score": 1.0,
-            "mode": "aht20-loop-retry"
-        }
+        "attached_sensors": attached_sensors,
+        "readings": readings,
+        "integrity": integrity,
     }
 
 
@@ -89,7 +94,7 @@ def post_payload(payload, max_attempts=3):
             response = urequests.post(
                 SERVER_URL,
                 headers={"Content-Type": "application/json"},
-                data=json.dumps(payload)
+                data=json.dumps(payload),
             )
 
             status = response.status_code
@@ -119,10 +124,13 @@ while True:
             reset()
 
         try:
-            temp, humidity = read_aht20()
-            print("T:", temp, "H:", humidity)
+            rescan_errors = maybe_rescan()
+            readings, read_errors = discovery.read_all(i2c, attached_sensors)
+            sensor_errors = discovery.merge_sensor_errors(rescan_errors, read_errors)
 
-            payload = build_payload(temp, humidity)
+            print("T:", readings.get("temperature_F"), "H:", readings.get("humidity_percent"))
+
+            payload = build_payload(readings, sensor_errors)
             ok = post_payload(payload)
 
             if not ok:

@@ -283,6 +283,7 @@ Optional `boot.py` for rollback if the new code fails immediately after reboot.
 
 **Branch:** `feature/i2c-sensor-discovery`  
 **Status:** Planned — lab work can start early; **field rollout requires Step 1 (OTA)**  
+**Design decisions:** [SENSOR_DISCOVERY.md](SENSOR_DISCOVERY.md) (rescan interval, starter bundle, CSV/API shape, same-address policy)  
 **Scope:** Detect which Adafruit (and compatible) sensor boards are attached on the I2C bus, report capabilities to the server, and read from supported drivers dynamically.
 
 Today, `pico/main.py` hardcodes a single **AHT20** at address `0x38` on GP4/GP5. Future nodes may carry different or multiple boards: higher-resolution temperature, VOC, CO2, particulate matter, etc.
@@ -403,7 +404,7 @@ Extend submit JSON (backward compatible — server accepts extra fields):
 }
 ```
 
-Server should store `attached_sensors` in CSV or a structured column for history. `/check` can show detected hardware per node.
+Server should store `attached_sensors` in CSV (`attached_sensors_json` column) for history. `/check` shows primary metrics and a short hardware summary — see [SENSOR_DISCOVERY.md](SENSOR_DISCOVERY.md).
 
 ### Server changes
 

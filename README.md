@@ -213,6 +213,7 @@ plant-sensor-server/
 ├── app.py                 # Flask server (host computer)
 ├── docs/
 │   ├── ROADMAP.md         # Implementation order, OTA strategy, feature plans
+│   ├── SENSOR_DISCOVERY.md # Step 2 design decisions (I2C discovery)
 │   └── OTA_TEST.md        # Lab OTA smoke test (integrity yellow)
 ├── pico/
 │   ├── main.py            # MicroPython firmware (Pico W)
@@ -229,7 +230,7 @@ Full plans live in [docs/ROADMAP.md](docs/ROADMAP.md). Start with **[Implementat
 |------|---------|
 | **0** | USB bootstrap — BT-capable UF2, `secrets.py`, OTA client (once per board) |
 | **1** | WiFi OTA — manifest, updater, modular `main.py` (**gate for field rollout**) |
-| **2** | I2C sensor identification — Adafruit breakouts, drivers via OTA |
+| **2** | I2C sensor identification — Adafruit breakouts, drivers via OTA — [design note](docs/SENSOR_DISCOVERY.md) |
 | **3** | Measurement integrity — GPIO heater, impulse / PRBS thermal probe |
 | **4** | BLE occupancy estimation — presence for events, airflow, heat-load anticipation |
 
