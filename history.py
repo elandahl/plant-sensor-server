@@ -96,22 +96,32 @@ def _numeric(value):
     return None
 
 
-def series_time(date_str, node_ids, field):
+def series_time(date_str, node_ids, fields):
     records = load_day(date_str, node_ids)
-    series = {node_id: [] for node_id in node_ids}
+    series = {}
+    for node_id in node_ids:
+        for field in fields:
+            series[f"{node_id}\u2022{field}"] = {
+                "node": node_id,
+                "field": field,
+                "points": [],
+            }
 
     for record in records:
         node_id = record["node_id"]
-        if node_id not in series:
+        if node_id not in node_ids:
             continue
-        value = _numeric(record["readings"].get(field))
-        if value is None:
-            continue
-        series[node_id].append({"t": record["t"], "v": value})
+        for field in fields:
+            value = _numeric(record["readings"].get(field))
+            if value is None:
+                continue
+            series[f"{node_id}\u2022{field}"]["points"].append(
+                {"t": record["t"], "v": value}
+            )
 
     return {
         "mode": "time",
-        "field": field,
+        "fields": fields,
         "series": series,
     }
 
