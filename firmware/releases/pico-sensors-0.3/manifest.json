@@ -1,0 +1,45 @@
+{
+  "version": "pico-sensors-0.3",
+  "files": [
+    {
+      "path": "discovery.py",
+      "sha256": "ff822700aa204488c9955bc50359f8274735ee57d34880a52c8a97b0245867a3",
+      "size": 3713
+    },
+    {
+      "path": "i2c_bus.py",
+      "sha256": "6499096a133bb2bbf6959224ea5f197b7b7ed748baf264244268c09fa51c0cd9",
+      "size": 161
+    },
+    {
+      "path": "main.py",
+      "sha256": "a83dbdb7f469073d15ae517403fea0bb69631ac38b7570028cda1c9b8360ddca",
+      "size": 3747
+    },
+    {
+      "path": "sensors/__init__.py",
+      "sha256": "07a159d42241b7fe90899a280171fae1cfed1c87268544b78ebb2dd9ea93532e",
+      "size": 197
+    },
+    {
+      "path": "sensors/aht20.py",
+      "sha256": "9dc02801f8206c57ac3a593115f2d43af5543a7f6896a37f98ba2b4b9267b39c",
+      "size": 812
+    },
+    {
+      "path": "sensors/ens160.py",
+      "sha256": "6800610b331e7cc688a1b1ed8b9038f314129846ab725d745308e37999e182d8",
+      "size": 2357
+    },
+    {
+      "path": "sensors/sgp40.py",
+      "sha256": "62b0d8bbbef79c25cbcfe611c5c87040ce513850f2bce430a95c099c3604c00d",
+      "size": 1807
+    },
+    {
+      "path": "update.py",
+      "sha256": "e1cb85e4e5707d650bb241112bc32b5e6be6e14cd0fa79b38c013ad8c36197bf",
+      "size": 3225
+    }
+  ]
+}

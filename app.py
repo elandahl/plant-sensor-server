@@ -293,7 +293,7 @@ def check():
                 <th>Sensors</th>
                 <th>Temp F</th>
                 <th>Humidity %</th>
-                <th>CO2 ppm</th>
+                <th>eCO2 ppm</th>
                 <th>Integrity</th>
             </tr>
             {rows}
