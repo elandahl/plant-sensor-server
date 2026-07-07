@@ -4,6 +4,8 @@ import csv
 import json
 import os
 
+import history
+
 app = Flask(__name__)
 
 DATA_DIR = "data"
@@ -289,7 +291,7 @@ def check():
     </head>
     <body>
         <h1>Plant Sensor Check</h1>
-        <p>Known nodes: {len(latest)}</p>
+        <p>Known nodes: {len(latest)} | <a href="/plot">Plot history</a></p>
 
         <table>
             <tr>
@@ -311,6 +313,316 @@ def check():
     """
 
     return html
+
+
+def _parse_node_list(raw):
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+@app.route("/api/plot/dates", methods=["GET"])
+def plot_dates():
+    return jsonify({"dates": history.list_dates()})
+
+
+@app.route("/api/plot/meta", methods=["GET"])
+def plot_meta():
+    date_str = request.args.get("date", "")
+    if not date_str:
+        return jsonify({"status": "error", "message": "Missing date"}), 400
+    if history.csv_path(date_str) is None:
+        return jsonify({"status": "error", "message": "No data for date"}), 404
+    return jsonify(history.day_meta(date_str))
+
+
+@app.route("/api/series", methods=["GET"])
+def plot_series():
+    date_str = request.args.get("date", "")
+    mode = request.args.get("mode", "time")
+    node_ids = _parse_node_list(request.args.get("nodes", ""))
+
+    if not date_str:
+        return jsonify({"status": "error", "message": "Missing date"}), 400
+    if history.csv_path(date_str) is None:
+        return jsonify({"status": "error", "message": "No data for date"}), 404
+    if not node_ids:
+        return jsonify({"status": "error", "message": "Missing nodes"}), 400
+
+    if mode == "time":
+        field = request.args.get("field", "")
+        if not field:
+            return jsonify({"status": "error", "message": "Missing field"}), 400
+        return jsonify(history.series_time(date_str, node_ids, field))
+
+    if mode == "xy":
+        x_field = request.args.get("x", "")
+        y_field = request.args.get("y", "")
+        if not x_field or not y_field:
+            return jsonify({"status": "error", "message": "Missing x or y field"}), 400
+        return jsonify(history.series_xy(date_str, node_ids, x_field, y_field))
+
+    return jsonify({"status": "error", "message": "Unknown mode"}), 400
+
+
+@app.route("/plot", methods=["GET"])
+def plot_page():
+    return """<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Plant Sensor Plot</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 2em; max-width: 1100px; }
+        fieldset { margin-bottom: 1em; border: 1px solid #ccc; padding: 1em; }
+        label { margin-right: 1em; }
+        .nodes label { display: inline-block; margin-right: 1.5em; margin-bottom: 0.5em; }
+        select, button { font-size: 1em; padding: 0.25em 0.5em; }
+        #status { color: #555; margin: 1em 0; }
+        #chart-wrap { max-width: 1000px; }
+        a { color: #06c; }
+    </style>
+</head>
+<body>
+    <h1>Plant Sensor Plot</h1>
+    <p><a href="/check">Back to check</a></p>
+
+    <fieldset>
+        <legend>Data</legend>
+        <label>Date
+            <select id="date-select"></select>
+        </label>
+        <span id="meta-info"></span>
+    </fieldset>
+
+    <fieldset>
+        <legend>Nodes</legend>
+        <div id="node-list" class="nodes"></div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Plot</legend>
+        <label><input type="radio" name="mode" value="time" checked> vs time</label>
+        <label><input type="radio" name="mode" value="xy"> X vs Y</label>
+        <div id="time-fields" style="margin-top:0.75em">
+            <label>Field <select id="field-select"></select></label>
+        </div>
+        <div id="xy-fields" style="margin-top:0.75em; display:none">
+            <label>X <select id="x-select"></select></label>
+            <label>Y <select id="y-select"></select></label>
+        </div>
+        <div style="margin-top:0.75em">
+            <button id="plot-btn" type="button">Plot</button>
+        </div>
+    </fieldset>
+
+    <p id="status">Loading dates...</p>
+    <div id="chart-wrap"><canvas id="chart"></canvas></div>
+
+    <script>
+    const dateSelect = document.getElementById("date-select");
+    const nodeList = document.getElementById("node-list");
+    const fieldSelect = document.getElementById("field-select");
+    const xSelect = document.getElementById("x-select");
+    const ySelect = document.getElementById("y-select");
+    const metaInfo = document.getElementById("meta-info");
+    const statusEl = document.getElementById("status");
+    const timeFields = document.getElementById("time-fields");
+    const xyFields = document.getElementById("xy-fields");
+    let chart = null;
+
+    const COLORS = [
+        "#2563eb", "#dc2626", "#16a34a", "#ca8a04",
+        "#9333ea", "#0891b2", "#ea580c", "#4b5563",
+    ];
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    function fillSelect(select, items, preferred) {
+        select.innerHTML = "";
+        for (const item of items) {
+            const opt = document.createElement("option");
+            opt.value = item;
+            opt.textContent = item;
+            select.appendChild(opt);
+        }
+        if (preferred && items.includes(preferred)) {
+            select.value = preferred;
+        }
+    }
+
+    function selectedNodes() {
+        return Array.from(nodeList.querySelectorAll("input:checked")).map(cb => cb.value);
+    }
+
+    function plotMode() {
+        return document.querySelector('input[name="mode"]:checked').value;
+    }
+
+    async function loadDates() {
+        const res = await fetch("/api/plot/dates");
+        const data = await res.json();
+        dateSelect.innerHTML = "";
+        for (const d of data.dates) {
+            const opt = document.createElement("option");
+            opt.value = d;
+            opt.textContent = d;
+            dateSelect.appendChild(opt);
+        }
+        if (data.dates.length === 0) {
+            setStatus("No CSV data files found.");
+            return;
+        }
+        await loadMeta();
+    }
+
+    async function loadMeta() {
+        const date = dateSelect.value;
+        setStatus("Loading " + date + "...");
+        const res = await fetch("/api/plot/meta?date=" + encodeURIComponent(date));
+        if (!res.ok) {
+            setStatus("No data for " + date);
+            nodeList.innerHTML = "";
+            return;
+        }
+        const meta = await res.json();
+        metaInfo.textContent = meta.row_count + " rows, " + meta.fields.length + " fields";
+
+        nodeList.innerHTML = "";
+        for (const node of meta.nodes) {
+            const label = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = node;
+            cb.checked = true;
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(" " + node));
+            nodeList.appendChild(label);
+        }
+
+        fillSelect(fieldSelect, meta.fields, "temperature_F");
+        fillSelect(xSelect, meta.fields, "ble_devices_close");
+        fillSelect(ySelect, meta.fields, "co2_ppm");
+        setStatus("Ready. Select nodes and click Plot.");
+    }
+
+    function destroyChart() {
+        if (chart) { chart.destroy(); chart = null; }
+    }
+
+    function buildTimeChart(payload) {
+        const datasets = [];
+        let i = 0;
+        for (const [node, points] of Object.entries(payload.series)) {
+            datasets.push({
+                label: node,
+                data: points.map(p => ({ x: p.t, y: p.v })),
+                borderColor: COLORS[i % COLORS.length],
+                backgroundColor: COLORS[i % COLORS.length],
+                tension: 0.1,
+                pointRadius: 2,
+                showLine: true,
+            });
+            i += 1;
+        }
+        destroyChart();
+        chart = new Chart(document.getElementById("chart"), {
+            type: "line",
+            data: { datasets },
+            options: {
+                parsing: false,
+                scales: {
+                    x: {
+                        type: "category",
+                        title: { display: true, text: "Time (UTC)" },
+                        ticks: { maxTicksLimit: 12 },
+                    },
+                    y: { title: { display: true, text: payload.field } },
+                },
+                plugins: { legend: { display: true } },
+            },
+        });
+    }
+
+    function buildXYChart(payload) {
+        const datasets = [];
+        let i = 0;
+        for (const [node, points] of Object.entries(payload.series)) {
+            datasets.push({
+                label: node,
+                data: points.map(p => ({ x: p.x, y: p.y })),
+                borderColor: COLORS[i % COLORS.length],
+                backgroundColor: COLORS[i % COLORS.length],
+                pointRadius: 3,
+                showLine: false,
+            });
+            i += 1;
+        }
+        destroyChart();
+        chart = new Chart(document.getElementById("chart"), {
+            type: "scatter",
+            data: { datasets },
+            options: {
+                scales: {
+                    x: { title: { display: true, text: payload.x_field } },
+                    y: { title: { display: true, text: payload.y_field } },
+                },
+                plugins: { legend: { display: true } },
+            },
+        });
+    }
+
+    async function runPlot() {
+        const nodes = selectedNodes();
+        if (nodes.length === 0) {
+            setStatus("Select at least one node.");
+            return;
+        }
+        const date = dateSelect.value;
+        const mode = plotMode();
+        let url = "/api/series?date=" + encodeURIComponent(date)
+            + "&nodes=" + encodeURIComponent(nodes.join(","))
+            + "&mode=" + mode;
+        if (mode === "time") {
+            url += "&field=" + encodeURIComponent(fieldSelect.value);
+        } else {
+            url += "&x=" + encodeURIComponent(xSelect.value)
+                + "&y=" + encodeURIComponent(ySelect.value);
+        }
+        setStatus("Plotting...");
+        const res = await fetch(url);
+        const payload = await res.json();
+        if (!res.ok) {
+            setStatus(payload.message || "Plot failed");
+            return;
+        }
+        let total = 0;
+        for (const pts of Object.values(payload.series)) total += pts.length;
+        if (total === 0) {
+            setStatus("No numeric data for selection.");
+            destroyChart();
+            return;
+        }
+        if (mode === "time") buildTimeChart(payload);
+        else buildXYChart(payload);
+        setStatus("Plotted " + total + " points for " + date + ".");
+    }
+
+    document.querySelectorAll('input[name="mode"]').forEach(r => {
+        r.addEventListener("change", () => {
+            const xy = plotMode() === "xy";
+            timeFields.style.display = xy ? "none" : "block";
+            xyFields.style.display = xy ? "block" : "none";
+        });
+    });
+    dateSelect.addEventListener("change", loadMeta);
+    document.getElementById("plot-btn").addEventListener("click", runPlot);
+
+    loadDates();
+    </script>
+</body>
+</html>"""
 
 
 if __name__ == "__main__":
