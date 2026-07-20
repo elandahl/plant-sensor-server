@@ -4,11 +4,12 @@ import csv
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DATA_DIR = "data"
 DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.csv$")
 DEFAULT_DIFF_TOL_S = 60.0
+MAX_SERIES_POINTS = 5000
 
 
 def list_dates():
@@ -29,6 +30,51 @@ def csv_path(date_str):
     if not os.path.isfile(path):
         return None
     return path
+
+
+def parse_date(date_str):
+    if not date_str or not re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
+        return None
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def resolve_range(start=None, end=None, date=None):
+    """Return (start_str, end_str) inclusive, or None if invalid/empty."""
+    if date and not start and not end:
+        start = date
+        end = date
+    if not start and not end:
+        return None
+    if start and not end:
+        end = start
+    if end and not start:
+        start = end
+    start_d = parse_date(start)
+    end_d = parse_date(end)
+    if start_d is None or end_d is None:
+        return None
+    if end_d < start_d:
+        start_d, end_d = end_d, start_d
+    return start_d.isoformat(), end_d.isoformat()
+
+
+def dates_in_range(start_str, end_str):
+    start_d = parse_date(start_str)
+    end_d = parse_date(end_str)
+    if start_d is None or end_d is None or end_d < start_d:
+        return []
+    available = set(list_dates())
+    days = []
+    cur = start_d
+    while cur <= end_d:
+        key = cur.isoformat()
+        if key in available:
+            days.append(key)
+        cur += timedelta(days=1)
+    return days
 
 
 def load_day(date_str, node_ids=None):
@@ -61,8 +107,35 @@ def load_day(date_str, node_ids=None):
     return records
 
 
+def load_range(start_str, end_str, node_ids=None, after_ts=None, before_ts=None):
+    records = []
+    for day in dates_in_range(start_str, end_str):
+        records.extend(load_day(day, node_ids))
+    records.sort(key=lambda r: r["t"])
+    if after_ts is None and before_ts is None:
+        return records
+    filtered = []
+    for record in records:
+        ts = _parse_ts(record["t"])
+        if ts is None:
+            continue
+        if after_ts is not None and ts < after_ts:
+            continue
+        if before_ts is not None and ts > before_ts:
+            continue
+        filtered.append(record)
+    return filtered
+
+
 def day_meta(date_str):
-    records = load_day(date_str)
+    return range_meta(date_str, date_str)
+
+
+def range_meta(start_str, end_str):
+    days = dates_in_range(start_str, end_str)
+    if not days:
+        return None
+    records = load_range(start_str, end_str)
     nodes = []
     fields = set()
     fields_by_node = {}
@@ -80,7 +153,11 @@ def day_meta(date_str):
                 fields.add(key)
                 fields_by_node[node_id].add(key)
     return {
-        "date": date_str,
+        "start": start_str,
+        "end": end_str,
+        "date": start_str if start_str == end_str else None,
+        "days": days,
+        "day_count": len(days),
         "nodes": sorted(nodes),
         "fields": sorted(fields),
         "fields_by_node": {
@@ -122,8 +199,29 @@ def _parse_ts(value):
     return dt.timestamp()
 
 
-def series_time(date_str, node_ids, fields):
-    records = load_day(date_str, node_ids)
+def parse_time_bound(value):
+    """Parse ISO timestamp or epoch seconds into float epoch, or None."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    return _parse_ts(value)
+
+
+def _downsample_points(points, max_points=MAX_SERIES_POINTS):
+    if max_points <= 0 or len(points) <= max_points:
+        return points
+    stride = max(1, (len(points) + max_points - 1) // max_points)
+    sampled = points[::stride]
+    if sampled[-1] is not points[-1]:
+        sampled.append(points[-1])
+    return sampled
+
+
+def series_time(start_str, end_str, node_ids, fields, after_ts=None, before_ts=None):
+    records = load_range(start_str, end_str, node_ids, after_ts, before_ts)
     series = {}
     for node_id in node_ids:
         for field in fields:
@@ -145,15 +243,20 @@ def series_time(date_str, node_ids, fields):
                 {"t": record["t"], "v": value}
             )
 
+    for entry in series.values():
+        entry["points"] = _downsample_points(entry["points"])
+
     return {
         "mode": "time",
+        "start": start_str,
+        "end": end_str,
         "fields": fields,
         "series": series,
     }
 
 
-def series_xy(date_str, node_ids, x_field, y_field):
-    records = load_day(date_str, node_ids)
+def series_xy(start_str, end_str, node_ids, x_field, y_field, after_ts=None, before_ts=None):
+    records = load_range(start_str, end_str, node_ids, after_ts, before_ts)
     series = {node_id: [] for node_id in node_ids}
 
     for record in records:
@@ -170,8 +273,13 @@ def series_xy(date_str, node_ids, x_field, y_field):
             "y": y_val,
         })
 
+    for node_id in series:
+        series[node_id] = _downsample_points(series[node_id])
+
     return {
         "mode": "xy",
+        "start": start_str,
+        "end": end_str,
         "x_field": x_field,
         "y_field": y_field,
         "series": series,
@@ -250,13 +358,14 @@ def _nearest_diff(series_a, series_b, tol_s):
     return points, {"matched": len(points), "unmatched": unmatched}
 
 
-def series_diff(date_str, diff_specs, tol_s=DEFAULT_DIFF_TOL_S):
+def series_diff(start_str, end_str, diff_specs, tol_s=DEFAULT_DIFF_TOL_S,
+                after_ts=None, before_ts=None):
     node_ids = sorted({
         spec["node_a"] for spec in diff_specs
     } | {
         spec["node_b"] for spec in diff_specs
     })
-    records = load_day(date_str, node_ids)
+    records = load_range(start_str, end_str, node_ids, after_ts, before_ts)
     series = {}
     stats = {}
 
@@ -272,7 +381,6 @@ def series_diff(date_str, diff_specs, tol_s=DEFAULT_DIFF_TOL_S):
         series_b = _extract_series(records, node_b, field_b)
 
         if node_a == node_b and field_a != field_b:
-            # Same timestamps when same node: exact join on t
             by_t = {p["t"]: p["v"] for p in series_b}
             points = []
             unmatched = 0
@@ -289,6 +397,7 @@ def series_diff(date_str, diff_specs, tol_s=DEFAULT_DIFF_TOL_S):
         else:
             points, entry_stats = _nearest_diff(series_a, series_b, tol_s)
 
+        points = _downsample_points(points)
         series[key] = {
             "label": label,
             "node_a": node_a,
@@ -301,6 +410,8 @@ def series_diff(date_str, diff_specs, tol_s=DEFAULT_DIFF_TOL_S):
 
     return {
         "mode": "diff",
+        "start": start_str,
+        "end": end_str,
         "tol_s": tol_s,
         "series": series,
         "stats": stats,
