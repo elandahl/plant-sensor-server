@@ -1,0 +1,120 @@
+{
+  "version": "pico-sensors-0.8",
+  "files": [
+    {
+      "path": "ble/__init__.py",
+      "sha256": "c59debc550d72920209d7bae3cc55f5abe4320879f470edb7e2fb9bd9310937f",
+      "size": 39
+    },
+    {
+      "path": "ble/dedup.py",
+      "sha256": "357c4ac2b4eb9b657b10c8b7e2bce9bfe65618c100f108cf62352825d2d014da",
+      "size": 365
+    },
+    {
+      "path": "ble/scan.py",
+      "sha256": "99d1097c4c4ea42de3367159c8cdfb78334906cb86092efb008316825d4061b2",
+      "size": 845
+    },
+    {
+      "path": "ble/scoring.py",
+      "sha256": "32f9722761b405a71460e9cbc3dd8c263d877245e438e91c553d1938678294d0",
+      "size": 653
+    },
+    {
+      "path": "discovery.py",
+      "sha256": "ff822700aa204488c9955bc50359f8274735ee57d34880a52c8a97b0245867a3",
+      "size": 3713
+    },
+    {
+      "path": "i2c_bus.py",
+      "sha256": "6499096a133bb2bbf6959224ea5f197b7b7ed748baf264244268c09fa51c0cd9",
+      "size": 161
+    },
+    {
+      "path": "lib/aioble/__init__.mpy",
+      "sha256": "82cb9af713a22ade2fa4002c18be4a45742bce78cc9c7786751e628176e143f6",
+      "size": 602
+    },
+    {
+      "path": "lib/aioble/central.mpy",
+      "sha256": "3df0319a2a84961cc1080ca68677177b24678a649e535867ad48dbfcd15aa48f",
+      "size": 2536
+    },
+    {
+      "path": "lib/aioble/client.mpy",
+      "sha256": "5f93769e85329e700e77e1d2ffdafed5acea49688e53ff85c27acc747836b3bc",
+      "size": 4106
+    },
+    {
+      "path": "lib/aioble/core.mpy",
+      "sha256": "c74327b4ad3e029a7f20f04a690723944e3a81e93ff61dbc1c641ba5bca29d0f",
+      "size": 763
+    },
+    {
+      "path": "lib/aioble/device.mpy",
+      "sha256": "8845d4381ec892de084e5709b8c6c12f4da7768e37ecfe115715ba4a9535b6a0",
+      "size": 2838
+    },
+    {
+      "path": "lib/aioble/l2cap.mpy",
+      "sha256": "b4f96a96147854375e4ae393af15308639c2e507e39e8f45d0130ad496cc3641",
+      "size": 1956
+    },
+    {
+      "path": "lib/aioble/peripheral.mpy",
+      "sha256": "385bed9735b82cf3ab997c47d8504b4da0f19fce5028350c5d01e55f70b3f364",
+      "size": 1432
+    },
+    {
+      "path": "lib/aioble/security.mpy",
+      "sha256": "ab1555729464eae3395324135cdebf1e69841bdcdf970458640cb58eb396f2ac",
+      "size": 1485
+    },
+    {
+      "path": "lib/aioble/server.mpy",
+      "sha256": "e85814fd470e2d90554a67a2ca0d0e957a1b7c6c489cf534af4a885ebd868743",
+      "size": 3276
+    },
+    {
+      "path": "main.py",
+      "sha256": "d4ac387bfefacdf17bc21e9b48a6ec9fc5eb68c54131458ce5b00cd2f1061297",
+      "size": 4735
+    },
+    {
+      "path": "schedule.py",
+      "sha256": "5ca70087257017c61f90718ec8473d519e79685b169e30dc3f4dfa42e44a5313",
+      "size": 384
+    },
+    {
+      "path": "sensors/__init__.py",
+      "sha256": "bcad249035f8ba7b157a4d846da7a389064944b501cfdd371961bcc18ce7deb5",
+      "size": 234
+    },
+    {
+      "path": "sensors/aht20.py",
+      "sha256": "9dc02801f8206c57ac3a593115f2d43af5543a7f6896a37f98ba2b4b9267b39c",
+      "size": 812
+    },
+    {
+      "path": "sensors/ens160.py",
+      "sha256": "54c9ac1e6eb837b4c006b98326f910a78ffbffe21ebbd3dbecde14f23c55bca2",
+      "size": 2421
+    },
+    {
+      "path": "sensors/sgp30.py",
+      "sha256": "f4dec58d626df0ac4713e4e68422394b56aa1b5ce26cef12dd8c919ce0e914a1",
+      "size": 3482
+    },
+    {
+      "path": "sensors/sgp40.py",
+      "sha256": "62b0d8bbbef79c25cbcfe611c5c87040ce513850f2bce430a95c099c3604c00d",
+      "size": 1807
+    },
+    {
+      "path": "update.py",
+      "sha256": "711f0f01c41d43ec556ade2997a89ba49d07ff7960f677f1eef58e10cf7bac89",
+      "size": 3399
+    }
+  ]
+}
