@@ -321,6 +321,23 @@ def _parse_node_list(raw):
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _request_time_range():
+    """Resolve start/end from query args. Supports date= (single day) or start/end."""
+    resolved = history.resolve_range(
+        start=request.args.get("start", ""),
+        end=request.args.get("end", ""),
+        date=request.args.get("date", ""),
+    )
+    if resolved is None:
+        return None, (jsonify({"status": "error", "message": "Missing date or start/end"}), 400)
+    start_str, end_str = resolved
+    if not history.dates_in_range(start_str, end_str):
+        return None, (jsonify({"status": "error", "message": "No data for range"}), 404)
+    after_ts = history.parse_time_bound(request.args.get("after", ""))
+    before_ts = history.parse_time_bound(request.args.get("before", ""))
+    return (start_str, end_str, after_ts, before_ts), None
+
+
 @app.route("/api/plot/dates", methods=["GET"])
 def plot_dates():
     return jsonify({"dates": history.list_dates()})
@@ -328,24 +345,24 @@ def plot_dates():
 
 @app.route("/api/plot/meta", methods=["GET"])
 def plot_meta():
-    date_str = request.args.get("date", "")
-    if not date_str:
-        return jsonify({"status": "error", "message": "Missing date"}), 400
-    if history.csv_path(date_str) is None:
-        return jsonify({"status": "error", "message": "No data for date"}), 404
-    return jsonify(history.day_meta(date_str))
+    resolved, err = _request_time_range()
+    if err:
+        return err
+    start_str, end_str, _, _ = resolved
+    meta = history.range_meta(start_str, end_str)
+    if meta is None:
+        return jsonify({"status": "error", "message": "No data for range"}), 404
+    return jsonify(meta)
 
 
 @app.route("/api/series", methods=["GET"])
 def plot_series():
-    date_str = request.args.get("date", "")
+    resolved, err = _request_time_range()
+    if err:
+        return err
+    start_str, end_str, after_ts, before_ts = resolved
     mode = request.args.get("mode", "time")
     node_ids = _parse_node_list(request.args.get("nodes", ""))
-
-    if not date_str:
-        return jsonify({"status": "error", "message": "Missing date"}), 400
-    if history.csv_path(date_str) is None:
-        return jsonify({"status": "error", "message": "No data for date"}), 404
 
     if mode == "diff":
         specs = history.parse_diff_specs(request.args.get("diffs", ""))
@@ -357,7 +374,10 @@ def plot_series():
             return jsonify({"status": "error", "message": "Invalid tol_s"}), 400
         if tol_s <= 0:
             return jsonify({"status": "error", "message": "tol_s must be positive"}), 400
-        return jsonify(history.series_diff(date_str, specs, tol_s=tol_s))
+        return jsonify(history.series_diff(
+            start_str, end_str, specs, tol_s=tol_s,
+            after_ts=after_ts, before_ts=before_ts,
+        ))
 
     if not node_ids:
         return jsonify({"status": "error", "message": "Missing nodes"}), 400
@@ -370,14 +390,20 @@ def plot_series():
                 fields = [single]
         if not fields:
             return jsonify({"status": "error", "message": "Missing field"}), 400
-        return jsonify(history.series_time(date_str, node_ids, fields))
+        return jsonify(history.series_time(
+            start_str, end_str, node_ids, fields,
+            after_ts=after_ts, before_ts=before_ts,
+        ))
 
     if mode == "xy":
         x_field = request.args.get("x", "")
         y_field = request.args.get("y", "")
         if not x_field or not y_field:
             return jsonify({"status": "error", "message": "Missing x or y field"}), 400
-        return jsonify(history.series_xy(date_str, node_ids, x_field, y_field))
+        return jsonify(history.series_xy(
+            start_str, end_str, node_ids, x_field, y_field,
+            after_ts=after_ts, before_ts=before_ts,
+        ))
 
     return jsonify({"status": "error", "message": "Unknown mode"}), 400
 
@@ -408,11 +434,27 @@ def plot_page():
     <p><a href="/check">Back to check</a></p>
 
     <fieldset>
-        <legend>Data</legend>
-        <label>Date
-            <select id="date-select"></select>
+        <legend>Time range</legend>
+        <label>Preset
+            <select id="range-preset">
+                <option value="today" selected>Today</option>
+                <option value="yesterday">Yesterday</option>
+                <option value="last24h">Last 24 hours</option>
+                <option value="last3d">Last 3 days</option>
+                <option value="last7d">Last 7 days</option>
+                <option value="last14d">Last 14 days</option>
+                <option value="all">All available</option>
+                <option value="custom">Custom dates</option>
+            </select>
+        </label>
+        <label>From
+            <select id="start-select"></select>
+        </label>
+        <label>To
+            <select id="end-select"></select>
         </label>
         <span id="meta-info"></span>
+        <p class="hint" id="range-hint"></p>
     </fieldset>
 
     <fieldset id="nodes-fieldset">
@@ -458,7 +500,10 @@ def plot_page():
     <div id="chart-wrap"><canvas id="chart"></canvas></div>
 
     <script>
-    const dateSelect = document.getElementById("date-select");
+    const startSelect = document.getElementById("start-select");
+    const endSelect = document.getElementById("end-select");
+    const rangePreset = document.getElementById("range-preset");
+    const rangeHint = document.getElementById("range-hint");
     const nodeList = document.getElementById("node-list");
     const fieldList = document.getElementById("field-list");
     const xSelect = document.getElementById("x-select");
@@ -632,35 +677,98 @@ def plot_page():
         });
     }
 
+    let availableDates = [];
+    let afterBound = null;
+
+    function fillDateSelect(select, preferred) {
+        fillSelect(select, availableDates, preferred);
+    }
+
+    function applyPreset(name) {
+        if (!availableDates.length) return;
+        afterBound = null;
+        const newest = availableDates[0];
+        const oldest = availableDates[availableDates.length - 1];
+        const custom = name === "custom";
+        startSelect.disabled = !custom;
+        endSelect.disabled = !custom;
+
+        if (name === "custom") {
+            rangeHint.textContent = "Pick From/To dates, then Plot.";
+            return;
+        }
+
+        let start = newest;
+        let end = newest;
+        const now = Date.now();
+
+        if (name === "today") {
+            start = end = newest;
+            rangeHint.textContent = "Single day: " + newest + ".";
+        } else if (name === "yesterday") {
+            start = end = availableDates[1] || newest;
+            rangeHint.textContent = "Single day: " + start + ".";
+        } else if (name === "last24h") {
+            afterBound = new Date(now - 24 * 3600 * 1000).toISOString();
+            const afterDay = afterBound.slice(0, 10);
+            const daysAsc = availableDates.slice().reverse();
+            if (afterDay <= oldest) start = oldest;
+            else if (availableDates.includes(afterDay)) start = afterDay;
+            else start = daysAsc.find(d => d >= afterDay) || newest;
+            end = newest;
+            rangeHint.textContent = "Rolling window: points after " + afterBound.slice(0, 19) + " UTC.";
+        } else if (name === "last3d" || name === "last7d" || name === "last14d") {
+            const n = name === "last3d" ? 3 : (name === "last7d" ? 7 : 14);
+            const slice = availableDates.slice(0, n);
+            end = newest;
+            start = slice[slice.length - 1];
+            rangeHint.textContent = n + " most recent days with data (" + start + " → " + end + ").";
+        } else if (name === "all") {
+            start = oldest;
+            end = newest;
+            rangeHint.textContent = "All days with CSV data (" + start + " → " + end + ").";
+        }
+
+        fillDateSelect(startSelect, start);
+        fillDateSelect(endSelect, end);
+    }
+
+    function rangeQuery() {
+        let start = startSelect.value;
+        let end = endSelect.value;
+        if (start > end) { const tmp = start; start = end; end = tmp; }
+        let q = "start=" + encodeURIComponent(start) + "&end=" + encodeURIComponent(end);
+        if (afterBound) q += "&after=" + encodeURIComponent(afterBound);
+        return { start, end, q };
+    }
+
     async function loadDates() {
         const res = await fetch("/api/plot/dates");
         const data = await res.json();
-        dateSelect.innerHTML = "";
-        for (const d of data.dates) {
-            const opt = document.createElement("option");
-            opt.value = d;
-            opt.textContent = d;
-            dateSelect.appendChild(opt);
-        }
-        if (data.dates.length === 0) {
+        availableDates = data.dates || [];
+        if (availableDates.length === 0) {
             setStatus("No CSV data files found.");
             return;
         }
+        fillDateSelect(startSelect, availableDates[0]);
+        fillDateSelect(endSelect, availableDates[0]);
+        applyPreset(rangePreset.value);
         await loadMeta();
     }
 
     async function loadMeta() {
-        const date = dateSelect.value;
-        setStatus("Loading " + date + "...");
-        const res = await fetch("/api/plot/meta?date=" + encodeURIComponent(date));
+        const { start, end, q } = rangeQuery();
+        setStatus("Loading " + start + " → " + end + "...");
+        const res = await fetch("/api/plot/meta?" + q);
         if (!res.ok) {
-            setStatus("No data for " + date);
+            setStatus("No data for " + start + " → " + end);
             nodeList.innerHTML = "";
             return;
         }
         const meta = await res.json();
         metaCache = meta;
-        metaInfo.textContent = meta.row_count + " rows, " + meta.fields.length + " fields";
+        metaInfo.textContent = meta.day_count + " day(s), " + meta.row_count +
+            " rows, " + meta.fields.length + " fields";
 
         nodeList.innerHTML = "";
         for (const node of meta.nodes) {
@@ -685,7 +793,13 @@ def plot_page():
     }
 
     function fmtTime(ms) {
-        return new Date(ms).toISOString().slice(11, 16);
+        const d = new Date(ms);
+        const multiDay = (metaCache.start && metaCache.end && metaCache.start !== metaCache.end)
+            || (rangePreset.value !== "today" && rangePreset.value !== "yesterday");
+        if (multiDay || afterBound) {
+            return d.toISOString().slice(5, 16).replace("T", " ");
+        }
+        return d.toISOString().slice(11, 16);
     }
 
     function buildLineChart(datasets, yTitleOrFields) {
@@ -817,9 +931,9 @@ def plot_page():
     }
 
     async function runPlot() {
-        const date = dateSelect.value;
+        const { start, end, q } = rangeQuery();
         const mode = plotMode();
-        let url = "/api/series?date=" + encodeURIComponent(date) + "&mode=" + mode;
+        let url = "/api/series?" + q + "&mode=" + mode;
 
         if (mode === "diff") {
             const diffs = collectDiffs();
@@ -870,6 +984,7 @@ def plot_page():
             return;
         }
 
+        const rangeLabel = start === end ? start : (start + " → " + end);
         if (mode === "time") buildTimeChart(payload);
         else if (mode === "diff") {
             buildDiffChart(payload);
@@ -877,11 +992,11 @@ def plot_page():
             for (const [key, st] of Object.entries(payload.stats || {})) {
                 parts.push(st.matched + " matched / " + st.unmatched + " unmatched");
             }
-            setStatus("Plotted " + total + " diff points (tol " + payload.tol_s +
-                " s). " + parts.join("; "));
+            setStatus("Plotted " + total + " diff points for " + rangeLabel +
+                " (tol " + payload.tol_s + " s). " + parts.join("; "));
             return;
         } else buildXYChart(payload);
-        setStatus("Plotted " + total + " points for " + date + ".");
+        setStatus("Plotted " + total + " points for " + rangeLabel + ".");
     }
 
     document.querySelectorAll('input[name="mode"]').forEach(r => {
@@ -905,7 +1020,24 @@ def plot_page():
             addDiffRow({ node_a: a, field_a: field, node_b: b, field_b: field });
         }
     });
-    dateSelect.addEventListener("change", loadMeta);
+    rangePreset.addEventListener("change", async () => {
+        applyPreset(rangePreset.value);
+        await loadMeta();
+    });
+    startSelect.addEventListener("change", async () => {
+        if (rangePreset.value !== "custom") rangePreset.value = "custom";
+        startSelect.disabled = false;
+        endSelect.disabled = false;
+        afterBound = null;
+        await loadMeta();
+    });
+    endSelect.addEventListener("change", async () => {
+        if (rangePreset.value !== "custom") rangePreset.value = "custom";
+        startSelect.disabled = false;
+        endSelect.disabled = false;
+        afterBound = null;
+        await loadMeta();
+    });
     document.getElementById("plot-btn").addEventListener("click", runPlot);
 
     loadDates();
