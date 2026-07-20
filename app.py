@@ -245,6 +245,10 @@ def check():
         temp = primary_metric(readings, "temperature_F")
         humidity = primary_metric(readings, "humidity_percent")
         co2 = primary_metric(readings, "co2_ppm")
+        if co2 == "":
+            co2 = primary_metric(readings, "sgp30_eco2_ppm")
+        aqi = primary_metric(readings, "aqi")
+        aqi_s = primary_metric(readings, "aqi_s")
         ble_seen = primary_metric(readings, "ble_devices_seen")
         ble_close = primary_metric(readings, "ble_devices_close")
         state = integrity.get("state", "")
@@ -261,6 +265,8 @@ def check():
             <td>{temp}</td>
             <td>{humidity}</td>
             <td>{co2}</td>
+            <td>{aqi}</td>
+            <td>{aqi_s}</td>
             <td>{ble_seen}</td>
             <td>{ble_close}</td>
             <td>{state}</td>
@@ -292,6 +298,10 @@ def check():
     <body>
         <h1>Plant Sensor Check</h1>
         <p>Known nodes: {len(latest)} | <a href="/plot">Plot history</a></p>
+        <p style="color:#555;font-size:0.9em">
+            AQI = UBA 1–5 (ENS160/161). AQI-S = ScioSense relative 0–500 (ENS161 only; 100 ≈ recent average).
+            eCO2 prefers ENS; SGP30 uses sgp30_eco2_ppm when ENS is absent.
+        </p>
 
         <table>
             <tr>
@@ -302,6 +312,8 @@ def check():
                 <th>Temp F</th>
                 <th>Humidity %</th>
                 <th>eCO2 ppm</th>
+                <th>AQI</th>
+                <th>AQI-S</th>
                 <th>BLE seen</th>
                 <th>BLE close</th>
                 <th>Integrity</th>
