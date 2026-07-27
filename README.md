@@ -32,7 +32,7 @@ Runs on the microcontroller and:
 - POSTs a JSON payload to the host server, with retries and backoff on failure
 - Blinks the onboard LED while taking a reading cycle
 
-Each node identifies itself with a `node_id` (default: `plant-080`). Multiple Picos can report to the same server.
+Each node identifies itself with a `NODE_ID` in `secrets.py` (e.g. `Plant-123`). The **prefix** (`Plant`, `Byrne417`, …) denotes site — WiFi and server stay tied to that prefix. See [docs/SITES.md](docs/SITES.md).
 
 ## Sensor: AHT20
 
@@ -125,53 +125,30 @@ For a durable deployment, run Flask behind **gunicorn** + **nginx**, or use **sy
 
 **macOS or Windows** can run the server for testing, but a small always-on Linux box is the usual choice for a plant monitor that runs 24/7.
 
-## Moving to a different network
+## Sites and moving networks
 
-Only the **Pico** needs network-specific configuration. The host server usually stays the same.
+**Prefix = site.** `Plant-123` uses plant WiFi + plant Pi; `Byrne417_01` uses lab WiFi + lab Pi. Full rules and a commissioning checklist: [docs/SITES.md](docs/SITES.md).
 
-### 1. WiFi credentials (Pico)
-
-Copy `pico/secrets_template.py` to `pico/secrets.py` on the device (do not commit `secrets.py`):
+Only the Pico’s **`secrets.py`** is site-specific (USB; never OTA’d). Copy from `pico/secrets_template.py`:
 
 ```python
 WIFI_SSID = "your-network-name"
 WIFI_PASSWORD = "your-network-password"
+SERVER_URL = "http://192.168.1.42:5000/api/submit"  # that site's Pi
+NODE_ID = "Plant-123"  # Prefix-NNN; reuse existing 3-digit plant IDs
 ```
 
-### 2. Server URL (Pico)
+`SERVER_URL` must be the LAN IP of the Pi on the **same** network as the Pico.
 
-In `pico/main.py`, set `SERVER_URL` to the **LAN IP address** of the machine running `app.py`:
+### Host server (`app.py`)
 
-```python
-SERVER_URL = "http://192.168.1.42:5000/api/submit"
-```
-
-Use the host’s IP on the **same WiFi/LAN** as the Pico, not the Pico’s own address.
-
-### 3. Host server (`app.py`)
-
-No changes are required for a new network. Defaults are already correct:
-
-```python
-app.run(host="0.0.0.0", port=5000)
-```
-
-Change the port only if you must; then update `SERVER_URL` on the Pico to match.
-
-### 4. Checklist
-
-1. Start the Flask server on the host (`python app.py` or your process manager).
-2. Find the host IP (`hostname -I` on Linux, or your router’s DHCP client list).
-3. Update `SERVER_URL` on the Pico and flash/copy the updated `main.py`.
-4. Ensure the host **firewall allows TCP port 5000** from the local subnet.
-5. Confirm the Pico and host are on the same network (or routable).
-6. Optional: set a unique `NODE_ID` per Pico if you have multiple plants.
+No code changes for a new network. Bind as usual (`0.0.0.0:5000`), open the firewall, deploy the same `firmware/` tree so OTA works on that site.
 
 ### Optional identifiers
 
 | Variable | File | Purpose |
 |----------|------|---------|
-| `NODE_ID` | `pico/main.py` | Unique name for this sensor node |
+| `NODE_ID` | `pico/secrets.py` | Unique name; prefix selects site |
 | `READ_INTERVAL_S` | `pico/main.py` | Seconds between readings (default `60`) |
 | `FIRMWARE_VERSION` | `pico/main.py` | Reported to the server for tracking |
 
@@ -183,7 +160,7 @@ Request body (JSON):
 
 ```json
 {
-  "node_id": "plant-080",
+  "node_id": "Plant-123",
   "firmware_version": "pico-aht20-0.2",
   "timestamp_node": "",
   "readings": {

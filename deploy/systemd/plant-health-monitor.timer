@@ -1,0 +1,12 @@
+[Unit]
+Description=Run plant health monitor every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=plant-health-monitor.service
+
+[Install]
+WantedBy=timers.target

@@ -217,6 +217,15 @@ def api_latest():
     return jsonify(output)
 
 
+@app.route("/api/latest/<path:node_id>", methods=["DELETE"])
+def forget_latest_node(node_id):
+    """Drop a node from the live /check table only. CSV history is untouched."""
+    if node_id in latest:
+        del latest[node_id]
+        return jsonify({"status": "forgotten", "node_id": node_id})
+    return jsonify({"status": "not_found", "node_id": node_id}), 404
+
+
 @app.route("/data", methods=["GET"])
 def list_data_files():
     files = sorted(os.listdir(DATA_DIR))
@@ -242,7 +251,9 @@ def check():
         integrity = record.get("integrity", {})
         attached_sensors = record.get("attached_sensors", [])
 
-        temp = primary_metric(readings, "temperature_F")
+        temp = primary_metric(readings, "tmp119_temperature_F")
+        if temp == "":
+            temp = primary_metric(readings, "temperature_F")
         humidity = primary_metric(readings, "humidity_percent")
         co2 = primary_metric(readings, "co2_ppm")
         if co2 == "":
@@ -300,6 +311,7 @@ def check():
         <p>Known nodes: {len(latest)} | <a href="/plot">Plot history</a></p>
         <p style="color:#555;font-size:0.9em">
             AQI = UBA 1–5 (ENS160/161). AQI-S = ScioSense relative 0–500 (ENS161 only; 100 ≈ recent average).
+            Temp prefers TMP119 (tmp119_temperature_F); else AHT20 temperature_F.
             eCO2 prefers ENS; SGP30 uses sgp30_eco2_ppm when ENS is absent.
         </p>
 

@@ -1,4 +1,6 @@
 data/
+logs/
 __pycache__/
 *.pyc
 pico/secrets.py
+firmware/uf2/

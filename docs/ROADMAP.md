@@ -47,7 +47,7 @@ Complete these **once per board** at provisioning (lab or field). After this, pr
 |---|--------|------------------------------|
 | 1 | Flash **Bluetooth-capable** [RPI_PICO_W MicroPython UF2](https://micropython.org/download/RPI_PICO_W/) | Runtime firmware is USB/BOOTSEL only |
 | 2 | Verify `import bluetooth` and `import network` in REPL | Confirms correct UF2 before sealing enclosure |
-| 3 | Copy `secrets.py` (from `secrets_template.py`) | WiFi credentials; never overwritten by OTA |
+| 3 | Copy `secrets.py` (from `secrets_template.py`) | WiFi + `SERVER_URL` + `NODE_ID`; prefix = site ([SITES.md](SITES.md)); never overwritten by OTA |
 | 4 | Copy **`urequests`** (and any other bundled deps) to `lib/` if not in firmware | HTTP for submit + OTA download |
 | 5 | Install **OTA-capable bootstrap** — first `main.py` + `update.py` (Feature 1) with modular layout | Last mandatory USB if done before sealing; enables all future updates |
 | 6 | Optional: pre-load `lib/aioble/`, empty `sensors/`, `integrity/`, `ble/` stubs | Saves first OTA round-trip; not required if OTA works |

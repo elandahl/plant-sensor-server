@@ -1,0 +1,12 @@
+[Unit]
+Description=Plant server network and sensor health probe
+After=network-online.target plant-sensor-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/plant-sensor-server
+ExecStart=/usr/bin/python3 /home/pi/plant-sensor-server/scripts/plant_health_monitor.py
+Nice=10
