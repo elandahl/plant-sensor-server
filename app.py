@@ -1,10 +1,13 @@
 from flask import Flask, request, jsonify, send_from_directory, abort
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import csv
 import json
 import os
 
 import history
+
+DISPLAY_TZ = ZoneInfo("America/Chicago")
 
 app = Flask(__name__)
 
@@ -265,7 +268,7 @@ def check():
         state = integrity.get("state", "")
         sensors = sensor_summary(attached_sensors)
 
-        last_seen = t.astimezone().strftime("%H:%M:%S")
+        last_seen = t.astimezone(DISPLAY_TZ).strftime("%H:%M:%S %Z")
 
         rows += f"""
         <tr>
@@ -318,7 +321,7 @@ def check():
         <table>
             <tr>
                 <th>Node</th>
-                <th>Last Seen</th>
+                <th>Last Seen (Central)</th>
                 <th>Age</th>
                 <th>Sensors</th>
                 <th>Temp F</th>
@@ -386,7 +389,24 @@ def plot_series():
         return err
     start_str, end_str, after_ts, before_ts = resolved
     mode = request.args.get("mode", "time")
-    node_ids = _parse_node_list(request.args.get("nodes", ""))
+
+    if mode == "expr":
+        specs = history.parse_expr_specs(request.args.get("exprs", ""))
+        if not specs:
+            return jsonify({"status": "error", "message": "Missing or invalid exprs"}), 400
+        try:
+            tol_s = float(request.args.get("tol_s", history.DEFAULT_DIFF_TOL_S))
+        except ValueError:
+            return jsonify({"status": "error", "message": "Invalid tol_s"}), 400
+        if tol_s <= 0:
+            return jsonify({"status": "error", "message": "tol_s must be positive"}), 400
+        try:
+            return jsonify(history.series_expr(
+                start_str, end_str, specs, tol_s=tol_s,
+                after_ts=after_ts, before_ts=before_ts,
+            ))
+        except ValueError as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
 
     if mode == "diff":
         specs = history.parse_diff_specs(request.args.get("diffs", ""))
@@ -403,15 +423,36 @@ def plot_series():
             after_ts=after_ts, before_ts=before_ts,
         ))
 
-    if not node_ids:
-        return jsonify({"status": "error", "message": "Missing nodes"}), 400
+    if mode == "xy_pair":
+        specs = history.parse_diff_specs(request.args.get("pairs", ""))
+        if not specs:
+            return jsonify({"status": "error", "message": "Missing or invalid pairs"}), 400
+        try:
+            tol_s = float(request.args.get("tol_s", history.DEFAULT_DIFF_TOL_S))
+        except ValueError:
+            return jsonify({"status": "error", "message": "Invalid tol_s"}), 400
+        if tol_s <= 0:
+            return jsonify({"status": "error", "message": "tol_s must be positive"}), 400
+        return jsonify(history.series_xy_pairs(
+            start_str, end_str, specs, tol_s=tol_s,
+            after_ts=after_ts, before_ts=before_ts,
+        ))
 
     if mode == "time":
+        specs = history.parse_series_specs(request.args.get("series", ""))
+        if specs:
+            return jsonify(history.series_time_specs(
+                start_str, end_str, specs,
+                after_ts=after_ts, before_ts=before_ts,
+            ))
+        node_ids = _parse_node_list(request.args.get("nodes", ""))
         fields = _parse_node_list(request.args.get("fields", ""))
         if not fields:
             single = request.args.get("field", "")
             if single:
                 fields = [single]
+        if not node_ids:
+            return jsonify({"status": "error", "message": "Missing series or nodes"}), 400
         if not fields:
             return jsonify({"status": "error", "message": "Missing field"}), 400
         return jsonify(history.series_time(
@@ -420,6 +461,9 @@ def plot_series():
         ))
 
     if mode == "xy":
+        node_ids = _parse_node_list(request.args.get("nodes", ""))
+        if not node_ids:
+            return jsonify({"status": "error", "message": "Missing nodes"}), 400
         x_field = request.args.get("x", "")
         y_field = request.args.get("y", "")
         if not x_field or not y_field:
@@ -441,16 +485,21 @@ def plot_page():
     <title>Plant Sensor Plot</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
-        body { font-family: sans-serif; margin: 2em; max-width: 1100px; }
+        body { font-family: sans-serif; margin: 2em; max-width: 1200px; }
         fieldset { margin-bottom: 1em; border: 1px solid #ccc; padding: 1em; }
-        label { margin-right: 1em; }
-        .nodes label { display: inline-block; margin-right: 1.5em; margin-bottom: 0.5em; }
-        .diff-row { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; margin-bottom: 0.5em; }
-        select, button { font-size: 1em; padding: 0.25em 0.5em; }
+        label { margin-right: 0.35em; }
+        .expr-row { display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin-bottom: 0.55em; }
+        .expr-row input[type="number"] { width: 4.5em; }
+        select, button, input[type="number"] { font-size: 1em; padding: 0.25em 0.4em; }
         #status { color: #555; margin: 1em 0; }
         #chart-wrap { max-width: 1000px; }
         a { color: #06c; }
         .hint { color: #666; font-size: 0.9em; }
+        #readout-panel { display: none; }
+        #readout-table { border-collapse: collapse; margin-top: 0.5em; }
+        #readout-table th, #readout-table td { border: 1px solid #ccc; padding: 0.35em 0.75em; text-align: left; }
+        #readout-table th { background: #eee; }
+        .preset-row { margin-top: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; }
     </style>
 </head>
 <body>
@@ -471,76 +520,63 @@ def plot_page():
                 <option value="custom">Custom dates</option>
             </select>
         </label>
-        <label>From
-            <select id="start-select"></select>
-        </label>
-        <label>To
-            <select id="end-select"></select>
-        </label>
+        <label>From <select id="start-select"></select></label>
+        <label>To <select id="end-select"></select></label>
         <span id="meta-info"></span>
         <p class="hint" id="range-hint"></p>
     </fieldset>
 
-    <fieldset id="nodes-fieldset">
-        <legend>Nodes</legend>
-        <div id="node-list" class="nodes"></div>
-        <p class="hint" id="nodes-hint"></p>
-    </fieldset>
-
     <fieldset>
-        <legend>Plot</legend>
-        <label><input type="radio" name="mode" value="time" checked> vs time</label>
-        <label><input type="radio" name="mode" value="xy"> X vs Y</label>
-        <label><input type="radio" name="mode" value="diff"> difference vs time</label>
-
-        <div id="time-fields" style="margin-top:0.75em">
-            <div style="margin-bottom:0.35em">Fields for selected nodes:</div>
-            <div id="field-list" class="nodes"></div>
-        </div>
-
-        <div id="xy-fields" style="margin-top:0.75em; display:none">
-            <label>X <select id="x-select"></select></label>
-            <label>Y <select id="y-select"></select></label>
-        </div>
-
-        <div id="diff-fields" style="margin-top:0.75em; display:none">
-            <p class="hint">A − B, nearest sample within tolerance (default 60 s).</p>
-            <div id="diff-rows"></div>
-            <div style="margin-top:0.5em">
-                <button id="add-diff-btn" type="button">Add difference</button>
-                <button id="quick-diff-btn" type="button">All shared fields (first two nodes)</button>
-                <label style="margin-left:1em">Tolerance (s)
-                    <input id="tol-input" type="number" min="1" step="1" value="60" style="width:4em">
-                </label>
-            </div>
-        </div>
-
-        <div style="margin-top:0.75em">
+        <legend>Expressions</legend>
+        <p class="hint">
+            Plot <code>a·A − c</code>, <code>a·A − b·B − c</code>, <code>a·A / b·B − c</code>, or <code>A vs B</code>.
+            Do not mix <code>vs</code> with the other ops in one plot. Division skips near-zero denominators.
+            Constants are display-only (not saved).
+        </p>
+        <div id="expr-rows"></div>
+        <div class="preset-row">
+            <button id="add-expr-btn" type="button">Add expression</button>
+            <button id="preset-temp-btn" type="button">All nodes × temperature_F</button>
+            <button id="preset-diff-btn" type="button">Diff shared (first two nodes)</button>
+            <button id="preset-ratio-btn" type="button">Ratio shared (first two)</button>
+            <button id="preset-xy-btn" type="button">XY shared (first two)</button>
+            <label>Tolerance (s)
+                <input id="tol-input" type="number" min="1" step="1" value="60" style="width:4em">
+            </label>
             <button id="plot-btn" type="button">Plot</button>
         </div>
+    </fieldset>
+
+    <fieldset id="readout-panel">
+        <legend>Values at cursor</legend>
+        <p class="hint" id="readout-time">Click the chart to read nearest samples at that time.</p>
+        <table id="readout-table">
+            <thead><tr><th>Expression</th><th>Value</th><th>Sample time (Central)</th><th>|Δt| s</th></tr></thead>
+            <tbody id="readout-body"></tbody>
+        </table>
     </fieldset>
 
     <p id="status">Loading dates...</p>
     <div id="chart-wrap"><canvas id="chart"></canvas></div>
 
     <script>
+    const TZ = "America/Chicago";
     const startSelect = document.getElementById("start-select");
     const endSelect = document.getElementById("end-select");
     const rangePreset = document.getElementById("range-preset");
     const rangeHint = document.getElementById("range-hint");
-    const nodeList = document.getElementById("node-list");
-    const fieldList = document.getElementById("field-list");
-    const xSelect = document.getElementById("x-select");
-    const ySelect = document.getElementById("y-select");
     const metaInfo = document.getElementById("meta-info");
     const statusEl = document.getElementById("status");
-    const timeFields = document.getElementById("time-fields");
-    const xyFields = document.getElementById("xy-fields");
-    const diffFields = document.getElementById("diff-fields");
-    const diffRows = document.getElementById("diff-rows");
-    const nodesHint = document.getElementById("nodes-hint");
+    const exprRows = document.getElementById("expr-rows");
+    const readoutPanel = document.getElementById("readout-panel");
+    const readoutBody = document.getElementById("readout-body");
+    const readoutTime = document.getElementById("readout-time");
+
     let chart = null;
     let metaCache = { nodes: [], fields: [], fields_by_node: {} };
+    let rowsInitialized = false;
+    let lastPlot = null;
+    let cursorMs = null;
 
     const COLORS = [
         "#2563eb", "#dc2626", "#16a34a", "#ca8a04",
@@ -548,6 +584,20 @@ def plot_page():
     ];
 
     function setStatus(msg) { statusEl.textContent = msg; }
+
+    function fmtCentral(ms, opts) {
+        return new Intl.DateTimeFormat("en-US", Object.assign({ timeZone: TZ }, opts)).format(new Date(ms));
+    }
+
+    function fmtCentralHint(isoOrMs) {
+        const ms = typeof isoOrMs === "number" ? isoOrMs : Date.parse(isoOrMs);
+        if (!Number.isFinite(ms)) return String(isoOrMs);
+        return fmtCentral(ms, {
+            year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit", second: "2-digit",
+            hour12: false,
+        }) + " CT";
+    }
 
     function fillSelect(select, items, preferred) {
         const prev = select.value;
@@ -562,124 +612,91 @@ def plot_page():
         else if (items.includes(prev)) select.value = prev;
     }
 
-    function selectedNodes() {
-        return Array.from(nodeList.querySelectorAll("input:checked")).map(cb => cb.value);
-    }
-
-    function selectedFields() {
-        return Array.from(fieldList.querySelectorAll("input:checked")).map(cb => cb.value);
-    }
-
-    function plotMode() {
-        return document.querySelector('input[name="mode"]:checked').value;
-    }
-
-    function fieldsForNodes(nodes) {
-        const fbn = metaCache.fields_by_node || {};
-        if (!nodes.length) return [];
-        const sets = nodes.map(n => new Set(fbn[n] || []));
-        const union = new Set();
-        for (const s of sets) for (const f of s) union.add(f);
-        return Array.from(union).sort();
-    }
-
     function sharedFields(nodeA, nodeB) {
         const fbn = metaCache.fields_by_node || {};
         const a = new Set(fbn[nodeA] || []);
         return (fbn[nodeB] || []).filter(f => a.has(f)).sort();
     }
 
-    function updateModePanels() {
-        const mode = plotMode();
-        timeFields.style.display = mode === "time" ? "block" : "none";
-        xyFields.style.display = mode === "xy" ? "block" : "none";
-        diffFields.style.display = mode === "diff" ? "block" : "none";
-        document.getElementById("nodes-fieldset").style.display =
-            mode === "diff" ? "none" : "block";
-        if (mode === "diff" && diffRows.children.length === 0) addDiffRow();
-        refreshFieldControls();
+    function numVal(input, fallback) {
+        const v = parseFloat(input.value);
+        return Number.isFinite(v) ? v : fallback;
     }
 
-    function refreshFieldControls() {
-        const nodes = selectedNodes();
-        const available = fieldsForNodes(nodes.length ? nodes : metaCache.nodes);
-        const prevChecked = new Set(selectedFields());
-
-        fieldList.innerHTML = "";
-        for (const field of available) {
-            const label = document.createElement("label");
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = field;
-            cb.checked = prevChecked.has(field) ||
-                (prevChecked.size === 0 && field === "temperature_F");
-            label.appendChild(cb);
-            label.appendChild(document.createTextNode(" " + field));
-            fieldList.appendChild(label);
-        }
-
-        fillSelect(xSelect, available, "ble_devices_close");
-        fillSelect(ySelect, available, "co2_ppm");
-
-        const missing = [];
-        if (nodes.length) {
-            for (const field of selectedFields()) {
-                const lacking = nodes.filter(n => !(metaCache.fields_by_node[n] || []).includes(field));
-                if (lacking.length) missing.push(field + " missing on " + lacking.join(", "));
-            }
-        }
-        nodesHint.textContent = missing.length
-            ? "Note: " + missing.join("; ") + " (those series stay empty)."
-            : "";
-
-        for (const row of diffRows.querySelectorAll(".diff-row")) syncDiffRow(row);
+    function syncBVisibility(row) {
+        const op = row.querySelector(".op").value;
+        const showB = op !== "none";
+        row.querySelectorAll(".b-part").forEach(el => {
+            el.style.display = showB ? "" : "none";
+        });
     }
 
-    function addDiffRow(preset) {
+    function addExprRow(preset) {
         const row = document.createElement("div");
-        row.className = "diff-row";
+        row.className = "expr-row";
         row.innerHTML =
+            '<input class="scale-a" type="number" step="any" value="1" title="a">' +
+            '<span>·</span>' +
             '<select class="node-a"></select>' +
             '<select class="field-a"></select>' +
+            '<select class="op">' +
+            '<option value="none">(none)</option>' +
+            '<option value="sub">−</option>' +
+            '<option value="div">/</option>' +
+            '<option value="vs">vs</option>' +
+            '</select>' +
+            '<span class="b-part"></span>' +
+            '<input class="scale-b b-part" type="number" step="any" value="1" title="b">' +
+            '<span class="b-part">·</span>' +
+            '<select class="node-b b-part"></select>' +
+            '<select class="field-b b-part"></select>' +
             '<span>−</span>' +
-            '<select class="node-b"></select>' +
-            '<select class="field-b"></select>' +
-            '<button type="button" class="remove-diff">Remove</button>';
-        diffRows.appendChild(row);
+            '<input class="scale-c" type="number" step="any" value="0" title="c">' +
+            '<button type="button" class="remove-row">Remove</button>';
+        exprRows.appendChild(row);
 
         const nodeA = row.querySelector(".node-a");
         const nodeB = row.querySelector(".node-b");
         const fieldA = row.querySelector(".field-a");
         const fieldB = row.querySelector(".field-b");
+        const op = row.querySelector(".op");
 
         fillSelect(nodeA, metaCache.nodes, (preset && preset.node_a) || metaCache.nodes[0]);
         fillSelect(nodeB, metaCache.nodes,
             (preset && preset.node_b) || metaCache.nodes[1] || metaCache.nodes[0]);
 
-        const onNodeChange = () => {
-            const shared = sharedFields(nodeA.value, nodeB.value);
+        const syncFields = () => {
             const allA = metaCache.fields_by_node[nodeA.value] || [];
             const allB = metaCache.fields_by_node[nodeB.value] || [];
-            fillSelect(fieldA, allA, (preset && preset.field_a) || shared[0] || allA[0]);
-            fillSelect(fieldB, allB, (preset && preset.field_b) || fieldA.value || allB[0]);
+            const shared = sharedFields(nodeA.value, nodeB.value);
+            fillSelect(fieldA, allA, (preset && preset.field_a) ||
+                (allA.includes("temperature_F") ? "temperature_F" : allA[0]));
+            fillSelect(fieldB, allB, (preset && preset.field_b) || shared[0] || allB[0]);
         };
-        nodeA.addEventListener("change", onNodeChange);
-        nodeB.addEventListener("change", onNodeChange);
+        nodeA.addEventListener("change", syncFields);
+        nodeB.addEventListener("change", syncFields);
         fieldA.addEventListener("change", () => {
             const allB = metaCache.fields_by_node[nodeB.value] || [];
             if (allB.includes(fieldA.value)) fieldB.value = fieldA.value;
         });
-        row.querySelector(".remove-diff").addEventListener("click", () => {
-            if (diffRows.children.length > 1) row.remove();
+        op.addEventListener("change", () => syncBVisibility(row));
+        row.querySelector(".remove-row").addEventListener("click", () => {
+            if (exprRows.children.length > 1) row.remove();
         });
-        onNodeChange();
+
+        syncFields();
         if (preset) {
+            if (preset.a != null) row.querySelector(".scale-a").value = preset.a;
+            if (preset.b != null) row.querySelector(".scale-b").value = preset.b;
+            if (preset.c != null) row.querySelector(".scale-c").value = preset.c;
+            if (preset.op) op.value = preset.op;
             if (preset.field_a) fieldA.value = preset.field_a;
             if (preset.field_b) fieldB.value = preset.field_b;
         }
+        syncBVisibility(row);
     }
 
-    function syncDiffRow(row) {
+    function syncExprRow(row) {
         const nodeA = row.querySelector(".node-a");
         const nodeB = row.querySelector(".node-b");
         const fieldA = row.querySelector(".field-a");
@@ -690,14 +707,27 @@ def plot_page():
         fillSelect(nodeB, metaCache.nodes, nodeB.value);
         fillSelect(fieldA, metaCache.fields_by_node[nodeA.value] || [], fa);
         fillSelect(fieldB, metaCache.fields_by_node[nodeB.value] || [], fb);
+        syncBVisibility(row);
     }
 
-    function collectDiffs() {
-        return Array.from(diffRows.querySelectorAll(".diff-row")).map(row => {
-            return row.querySelector(".node-a").value + ":" +
-                row.querySelector(".field-a").value + "-" +
-                row.querySelector(".node-b").value + ":" +
-                row.querySelector(".field-b").value;
+    function collectExprs() {
+        return Array.from(exprRows.querySelectorAll(".expr-row")).map(row => {
+            const op = row.querySelector(".op").value;
+            const spec = {
+                a: numVal(row.querySelector(".scale-a"), 1),
+                node_a: row.querySelector(".node-a").value,
+                field_a: row.querySelector(".field-a").value,
+                op: op,
+                b: numVal(row.querySelector(".scale-b"), 1),
+                node_b: row.querySelector(".node-b").value,
+                field_b: row.querySelector(".field-b").value,
+                c: numVal(row.querySelector(".scale-c"), 0),
+            };
+            if (op === "none") {
+                spec.node_b = "";
+                spec.field_b = "";
+            }
+            return spec;
         });
     }
 
@@ -716,22 +746,19 @@ def plot_page():
         const custom = name === "custom";
         startSelect.disabled = !custom;
         endSelect.disabled = !custom;
-
         if (name === "custom") {
             rangeHint.textContent = "Pick From/To dates, then Plot.";
             return;
         }
-
         let start = newest;
         let end = newest;
         const now = Date.now();
-
         if (name === "today") {
             start = end = newest;
-            rangeHint.textContent = "Single day: " + newest + ".";
+            rangeHint.textContent = "Single day: " + newest + " (chart times Central).";
         } else if (name === "yesterday") {
             start = end = availableDates[1] || newest;
-            rangeHint.textContent = "Single day: " + start + ".";
+            rangeHint.textContent = "Single day: " + start + " (chart times Central).";
         } else if (name === "last24h") {
             afterBound = new Date(now - 24 * 3600 * 1000).toISOString();
             const afterDay = afterBound.slice(0, 10);
@@ -740,7 +767,7 @@ def plot_page():
             else if (availableDates.includes(afterDay)) start = afterDay;
             else start = daysAsc.find(d => d >= afterDay) || newest;
             end = newest;
-            rangeHint.textContent = "Rolling window: points after " + afterBound.slice(0, 19) + " UTC.";
+            rangeHint.textContent = "Rolling window: points after " + fmtCentralHint(afterBound) + ".";
         } else if (name === "last3d" || name === "last7d" || name === "last14d") {
             const n = name === "last3d" ? 3 : (name === "last7d" ? 7 : 14);
             const slice = availableDates.slice(0, n);
@@ -752,7 +779,6 @@ def plot_page():
             end = newest;
             rangeHint.textContent = "All days with CSV data (" + start + " → " + end + ").";
         }
-
         fillDateSelect(startSelect, start);
         fillDateSelect(endSelect, end);
     }
@@ -770,7 +796,7 @@ def plot_page():
         const res = await fetch("/api/plot/dates");
         const data = await res.json();
         availableDates = data.dates || [];
-        if (availableDates.length === 0) {
+        if (!availableDates.length) {
             setStatus("No CSV data files found.");
             return;
         }
@@ -786,30 +812,23 @@ def plot_page():
         const res = await fetch("/api/plot/meta?" + q);
         if (!res.ok) {
             setStatus("No data for " + start + " → " + end);
-            nodeList.innerHTML = "";
             return;
         }
-        const meta = await res.json();
-        metaCache = meta;
-        metaInfo.textContent = meta.day_count + " day(s), " + meta.row_count +
-            " rows, " + meta.fields.length + " fields";
+        const prev = rowsInitialized ? collectExprs() : null;
+        metaCache = await res.json();
+        metaInfo.textContent = metaCache.day_count + " day(s), " + metaCache.row_count +
+            " rows, " + metaCache.fields.length + " fields";
 
-        nodeList.innerHTML = "";
-        for (const node of meta.nodes) {
-            const label = document.createElement("label");
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = node;
-            cb.checked = true;
-            cb.addEventListener("change", refreshFieldControls);
-            label.appendChild(cb);
-            label.appendChild(document.createTextNode(" " + node));
-            nodeList.appendChild(label);
+        if (prev && prev.length) {
+            exprRows.innerHTML = "";
+            for (const spec of prev) addExprRow(spec);
+        } else if (!exprRows.children.length) {
+            addExprRow({ op: "none" });
+        } else {
+            for (const row of exprRows.querySelectorAll(".expr-row")) syncExprRow(row);
         }
-
-        diffRows.innerHTML = "";
-        updateModePanels();
-        setStatus("Ready. Select options and click Plot.");
+        rowsInitialized = true;
+        setStatus("Ready. Edit expressions and click Plot.");
     }
 
     function destroyChart() {
@@ -817,100 +836,80 @@ def plot_page():
     }
 
     function fmtTime(ms) {
-        const d = new Date(ms);
         const multiDay = (metaCache.start && metaCache.end && metaCache.start !== metaCache.end)
             || (rangePreset.value !== "today" && rangePreset.value !== "yesterday");
         if (multiDay || afterBound) {
-            return d.toISOString().slice(5, 16).replace("T", " ");
+            return fmtCentral(ms, {
+                month: "2-digit", day: "2-digit",
+                hour: "2-digit", minute: "2-digit",
+                hour12: false,
+            });
         }
-        return d.toISOString().slice(11, 16);
+        return fmtCentral(ms, { hour: "2-digit", minute: "2-digit", hour12: false });
     }
 
-    function buildLineChart(datasets, yTitleOrFields) {
-        const fields = Array.isArray(yTitleOrFields) ? yTitleOrFields : null;
-        const useMultiAxis = fields && fields.length > 1;
-        const axisId = f => "y_" + f.replace(/[^a-zA-Z0-9]/g, "_");
+    function nearestPoint(points, targetMs, valueKey) {
+        let best = null;
+        let bestDt = Infinity;
+        for (const p of points) {
+            const ms = Date.parse(p.t);
+            if (!Number.isFinite(ms)) continue;
+            const dt = Math.abs(ms - targetMs);
+            if (dt < bestDt) {
+                bestDt = dt;
+                best = p;
+            }
+        }
+        return best ? { point: best, dt: bestDt, ms: Date.parse(best.t), valueKey } : null;
+    }
 
-        const scales = {
-            x: {
-                type: "linear",
-                title: { display: true, text: "Time (UTC)" },
-                ticks: { maxTicksLimit: 12, callback: v => fmtTime(v) },
+    function updateReadout(targetMs) {
+        if (!lastPlot || lastPlot.payload.kind !== "time") {
+            readoutPanel.style.display = "none";
+            return;
+        }
+        cursorMs = targetMs;
+        readoutPanel.style.display = "block";
+        readoutTime.textContent = "Cursor: " + fmtCentralHint(targetMs) + " (nearest sample per expression).";
+        readoutBody.innerHTML = "";
+        for (const entry of Object.values(lastPlot.payload.series)) {
+            const hit = nearestPoint(entry.points, targetMs, "v");
+            const tr = document.createElement("tr");
+            if (!hit) {
+                tr.innerHTML = "<td>" + entry.label + "</td><td>—</td><td>—</td><td>—</td>";
+            } else {
+                tr.innerHTML = "<td>" + entry.label + "</td><td>" + hit.point.v + "</td><td>" +
+                    fmtCentralHint(hit.ms) + "</td><td>" + hit.dt.toFixed(1) + "</td>";
+            }
+            readoutBody.appendChild(tr);
+        }
+    }
+
+    function cursorPlugin() {
+        return {
+            id: "centralCursor",
+            afterDraw(c) {
+                if (cursorMs == null || !c.scales.x) return;
+                const x = c.scales.x.getPixelForValue(cursorMs);
+                if (x < c.chartArea.left || x > c.chartArea.right) return;
+                const ctx = c.ctx;
+                ctx.save();
+                ctx.strokeStyle = "#666";
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(x, c.chartArea.top);
+                ctx.lineTo(x, c.chartArea.bottom);
+                ctx.stroke();
+                ctx.restore();
             },
         };
-
-        if (useMultiAxis) {
-            fields.forEach((f, idx) => {
-                scales[axisId(f)] = {
-                    type: "linear",
-                    position: idx % 2 === 0 ? "left" : "right",
-                    title: { display: true, text: f },
-                    grid: { drawOnChartArea: idx === 0 },
-                };
-            });
-            datasets.forEach(ds => {
-                if (ds._axisField) ds.yAxisID = axisId(ds._axisField);
-            });
-        } else {
-            scales.y = {
-                title: {
-                    display: true,
-                    text: fields ? (fields[0] || "") : (yTitleOrFields || ""),
-                },
-            };
-            datasets.forEach(ds => { ds.yAxisID = "y"; });
-        }
-
-        destroyChart();
-        chart = new Chart(document.getElementById("chart"), {
-            type: "line",
-            data: { datasets },
-            options: {
-                parsing: false,
-                scales: scales,
-                plugins: {
-                    legend: { display: true },
-                    tooltip: {
-                        callbacks: {
-                            title: items => items.length
-                                ? new Date(items[0].parsed.x).toISOString().slice(11, 19) + " UTC"
-                                : "",
-                        },
-                    },
-                },
-            },
-        });
     }
 
     function buildTimeChart(payload) {
-        const fields = payload.fields || [];
         const datasets = [];
         let i = 0;
         for (const entry of Object.values(payload.series)) {
-            datasets.push({
-                label: entry.node + " \\u2022 " + entry.field,
-                data: entry.points.map(p => ({ x: Date.parse(p.t), y: p.v })),
-                borderColor: COLORS[i % COLORS.length],
-                backgroundColor: COLORS[i % COLORS.length],
-                tension: 0.1,
-                pointRadius: 0,
-                showLine: true,
-                _axisField: entry.field,
-            });
-            i += 1;
-        }
-        buildLineChart(datasets, fields);
-    }
-
-    function buildDiffChart(payload) {
-        const datasets = [];
-        const axisFields = [];
-        let i = 0;
-        for (const entry of Object.values(payload.series)) {
-            const axisField = entry.field_a === entry.field_b
-                ? ("\\u0394 " + entry.field_a)
-                : ("\\u0394 " + entry.field_a + "-" + entry.field_b);
-            if (!axisFields.includes(axisField)) axisFields.push(axisField);
             datasets.push({
                 label: entry.label,
                 data: entry.points.map(p => ({ x: Date.parse(p.t), y: p.v })),
@@ -919,20 +918,59 @@ def plot_page():
                 tension: 0.1,
                 pointRadius: 0,
                 showLine: true,
-                _axisField: axisField,
             });
             i += 1;
         }
-        buildLineChart(datasets, axisFields);
+        readoutPanel.style.display = "block";
+        destroyChart();
+        chart = new Chart(document.getElementById("chart"), {
+            type: "line",
+            data: { datasets },
+            options: {
+                parsing: false,
+                scales: {
+                    x: {
+                        type: "linear",
+                        title: { display: true, text: "Time (Central)" },
+                        ticks: { maxTicksLimit: 12, callback: v => fmtTime(v) },
+                    },
+                    y: { title: { display: true, text: "Value" } },
+                },
+                plugins: {
+                    legend: { display: true },
+                    tooltip: {
+                        callbacks: {
+                            title: items => items.length
+                                ? fmtCentral(items[0].parsed.x, {
+                                    hour: "2-digit", minute: "2-digit", second: "2-digit",
+                                    hour12: false,
+                                }) + " CT"
+                                : "",
+                        },
+                    },
+                },
+                onClick: (evt, _els, c) => {
+                    const xScale = c.scales.x;
+                    if (!xScale) return;
+                    const x = xScale.getValueForPixel(evt.x);
+                    if (Number.isFinite(x)) {
+                        updateReadout(x);
+                        c.draw();
+                    }
+                },
+            },
+            plugins: [cursorPlugin()],
+        });
+        if (cursorMs != null) updateReadout(cursorMs);
     }
 
     function buildXYChart(payload) {
         const datasets = [];
         let i = 0;
-        for (const [node, points] of Object.entries(payload.series)) {
+        for (const entry of Object.values(payload.series)) {
             datasets.push({
-                label: node,
-                data: points.map(p => ({ x: p.x, y: p.y })),
+                label: entry.label,
+                data: entry.points.map(p => ({ x: p.x, y: p.y })),
                 borderColor: COLORS[i % COLORS.length],
                 backgroundColor: COLORS[i % COLORS.length],
                 pointRadius: 3,
@@ -940,14 +978,15 @@ def plot_page():
             });
             i += 1;
         }
+        readoutPanel.style.display = "none";
         destroyChart();
         chart = new Chart(document.getElementById("chart"), {
             type: "scatter",
             data: { datasets },
             options: {
                 scales: {
-                    x: { title: { display: true, text: payload.x_field } },
-                    y: { title: { display: true, text: payload.y_field } },
+                    x: { title: { display: true, text: "X (= a·A)" } },
+                    y: { title: { display: true, text: "Y (= b·B − c)" } },
                 },
                 plugins: { legend: { display: true } },
             },
@@ -955,38 +994,20 @@ def plot_page():
     }
 
     async function runPlot() {
-        const { start, end, q } = rangeQuery();
-        const mode = plotMode();
-        let url = "/api/series?" + q + "&mode=" + mode;
-
-        if (mode === "diff") {
-            const diffs = collectDiffs();
-            if (!diffs.length) {
-                setStatus("Add at least one difference.");
-                return;
-            }
-            const tol = document.getElementById("tol-input").value || "60";
-            url += "&diffs=" + encodeURIComponent(diffs.join(","))
-                + "&tol_s=" + encodeURIComponent(tol);
-        } else {
-            const nodes = selectedNodes();
-            if (nodes.length === 0) {
-                setStatus("Select at least one node.");
-                return;
-            }
-            url += "&nodes=" + encodeURIComponent(nodes.join(","));
-            if (mode === "time") {
-                const fields = selectedFields();
-                if (fields.length === 0) {
-                    setStatus("Select at least one field.");
-                    return;
-                }
-                url += "&fields=" + encodeURIComponent(fields.join(","));
-            } else {
-                url += "&x=" + encodeURIComponent(xSelect.value)
-                    + "&y=" + encodeURIComponent(ySelect.value);
-            }
+        const exprs = collectExprs();
+        if (!exprs.length) {
+            setStatus("Add at least one expression.");
+            return;
         }
+        const ops = new Set(exprs.map(e => e.op));
+        if (ops.has("vs") && [...ops].some(o => o !== "vs")) {
+            setStatus("Cannot mix vs with − / / (none) in one plot.");
+            return;
+        }
+        const { start, end, q } = rangeQuery();
+        const tol = document.getElementById("tol-input").value || "60";
+        const url = "/api/series?" + q + "&mode=expr&tol_s=" + encodeURIComponent(tol) +
+            "&exprs=" + encodeURIComponent(JSON.stringify(exprs));
 
         setStatus("Plotting...");
         const res = await fetch(url);
@@ -995,53 +1016,95 @@ def plot_page():
             setStatus(payload.message || "Plot failed");
             return;
         }
-
         let total = 0;
-        if (mode === "xy") {
-            for (const pts of Object.values(payload.series)) total += pts.length;
-        } else {
-            for (const entry of Object.values(payload.series)) total += entry.points.length;
-        }
+        for (const entry of Object.values(payload.series || {})) total += entry.points.length;
         if (total === 0) {
             setStatus("No numeric data for selection.");
             destroyChart();
             return;
         }
-
+        lastPlot = { payload };
+        cursorMs = null;
         const rangeLabel = start === end ? start : (start + " → " + end);
-        if (mode === "time") buildTimeChart(payload);
-        else if (mode === "diff") {
-            buildDiffChart(payload);
-            const parts = [];
-            for (const [key, st] of Object.entries(payload.stats || {})) {
-                parts.push(st.matched + " matched / " + st.unmatched + " unmatched");
-            }
-            setStatus("Plotted " + total + " diff points for " + rangeLabel +
+        const parts = [];
+        for (const st of Object.values(payload.stats || {})) {
+            let s = st.matched + " matched";
+            if (st.unmatched) s += " / " + st.unmatched + " unmatched";
+            if (st.skipped) s += " / " + st.skipped + " ÷0 skipped";
+            parts.push(s);
+        }
+        if (payload.kind === "xy") {
+            buildXYChart(payload);
+            setStatus("Plotted " + total + " XY points for " + rangeLabel +
                 " (tol " + payload.tol_s + " s). " + parts.join("; "));
-            return;
-        } else buildXYChart(payload);
-        setStatus("Plotted " + total + " points for " + rangeLabel + ".");
+        } else {
+            buildTimeChart(payload);
+            setStatus("Plotted " + total + " points for " + rangeLabel +
+                (parts.length ? " (" + parts.join("; ") + ")" : "") +
+                ". Click chart for readout.");
+        }
     }
 
-    document.querySelectorAll('input[name="mode"]').forEach(r => {
-        r.addEventListener("change", updateModePanels);
-    });
-    document.getElementById("add-diff-btn").addEventListener("click", () => addDiffRow());
-    document.getElementById("quick-diff-btn").addEventListener("click", () => {
+    function firstTwoShared() {
         if (metaCache.nodes.length < 2) {
-            setStatus("Need at least two nodes for quick compare.");
-            return;
+            setStatus("Need at least two nodes.");
+            return null;
         }
         const a = metaCache.nodes[0];
         const b = metaCache.nodes[1];
         const shared = sharedFields(a, b);
         if (!shared.length) {
-            setStatus("No shared numeric fields between " + a + " and " + b + ".");
-            return;
+            setStatus("No shared fields between " + a + " and " + b + ".");
+            return null;
         }
-        diffRows.innerHTML = "";
-        for (const field of shared) {
-            addDiffRow({ node_a: a, field_a: field, node_b: b, field_b: field });
+        return { a, b, shared };
+    }
+
+    document.getElementById("add-expr-btn").addEventListener("click", () => addExprRow({ op: "none" }));
+    document.getElementById("preset-temp-btn").addEventListener("click", () => {
+        exprRows.innerHTML = "";
+        for (const node of metaCache.nodes) {
+            const fields = metaCache.fields_by_node[node] || [];
+            if (fields.includes("temperature_F")) {
+                addExprRow({ op: "none", node_a: node, field_a: "temperature_F", a: 1, c: 0 });
+            }
+        }
+        if (!exprRows.children.length) addExprRow({ op: "none" });
+    });
+    document.getElementById("preset-diff-btn").addEventListener("click", () => {
+        const info = firstTwoShared();
+        if (!info) return;
+        exprRows.innerHTML = "";
+        for (const field of info.shared) {
+            addExprRow({
+                op: "sub", a: 1, b: 1, c: 0,
+                node_a: info.a, field_a: field,
+                node_b: info.b, field_b: field,
+            });
+        }
+    });
+    document.getElementById("preset-ratio-btn").addEventListener("click", () => {
+        const info = firstTwoShared();
+        if (!info) return;
+        exprRows.innerHTML = "";
+        for (const field of info.shared) {
+            addExprRow({
+                op: "div", a: 1, b: 1, c: 0,
+                node_a: info.a, field_a: field,
+                node_b: info.b, field_b: field,
+            });
+        }
+    });
+    document.getElementById("preset-xy-btn").addEventListener("click", () => {
+        const info = firstTwoShared();
+        if (!info) return;
+        exprRows.innerHTML = "";
+        for (const field of info.shared) {
+            addExprRow({
+                op: "vs", a: 1, b: 1, c: 0,
+                node_a: info.a, field_a: field,
+                node_b: info.b, field_b: field,
+            });
         }
     });
     rangePreset.addEventListener("change", async () => {
