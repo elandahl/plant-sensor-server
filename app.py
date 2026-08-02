@@ -288,9 +288,13 @@ def check():
         if temp == "":
             temp = primary_metric(readings, "temperature_F")
         humidity = primary_metric(readings, "humidity_percent")
-        co2 = primary_metric(readings, "co2_ppm")
-        if co2 == "":
-            co2 = primary_metric(readings, "sgp30_eco2_ppm")
+        # True NDIR CO2 (SCD-40/41/30) — separate from MOS eCO2.
+        co2_true = primary_metric(readings, "scd4x_co2_ppm")
+        if co2_true == "":
+            co2_true = primary_metric(readings, "scd30_co2_ppm")
+        eco2 = primary_metric(readings, "co2_ppm")
+        if eco2 == "":
+            eco2 = primary_metric(readings, "sgp30_eco2_ppm")
         aqi = primary_metric(readings, "aqi")
         aqi_s = primary_metric(readings, "aqi_s")
         ble_seen = primary_metric(readings, "ble_devices_seen")
@@ -308,7 +312,8 @@ def check():
             <td>{sensors}</td>
             <td>{temp}</td>
             <td>{humidity}</td>
-            <td>{co2}</td>
+            <td>{co2_true}</td>
+            <td>{eco2}</td>
             <td>{aqi}</td>
             <td>{aqi_s}</td>
             <td>{ble_seen}</td>
@@ -345,7 +350,8 @@ def check():
         <p style="color:#555;font-size:0.9em">
             AQI = UBA 1–5 (ENS160/161). AQI-S = ScioSense relative 0–500 (ENS161 only; 100 ≈ recent average).
             Temp prefers TMP119 (tmp119_temperature_F); else AHT20 temperature_F.
-            eCO2 prefers ENS; SGP30 uses sgp30_eco2_ppm when ENS is absent.
+            CO2 = true NDIR (scd4x_co2_ppm / scd30_co2_ppm).
+            eCO2 = MOS estimate (ENS co2_ppm, else SGP30 sgp30_eco2_ppm).
         </p>
 
         <table>
@@ -356,6 +362,7 @@ def check():
                 <th>Sensors</th>
                 <th>Temp F</th>
                 <th>Humidity %</th>
+                <th>CO2 ppm</th>
                 <th>eCO2 ppm</th>
                 <th>AQI</th>
                 <th>AQI-S</th>
