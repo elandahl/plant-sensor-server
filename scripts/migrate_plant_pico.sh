@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Migrate an old plant wall Pico (CircuitPython or ancient MicroPython)
-# to Plantnet + pico-sensors-0.91.
+# to Plantnet + fleet baseline firmware (default pico-sensors-0.91).
 #
 # Two phases:
 #   1) Flash BT-capable MicroPython UF2 (wipes CircuitPython / old runtime)
@@ -8,6 +8,7 @@
 #
 # Usage:
 #   ./scripts/migrate_plant_pico.sh Plant-080
+#   ./scripts/migrate_plant_pico.sh Plant-080 pico-sensors-0.92
 #
 # Physical steps when prompted:
 #   - Unplug wall power
@@ -22,9 +23,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 NODE_ID="${1:-}"
+RELEASE_NAME="${2:-pico-sensors-0.91}"
 if [[ -z "$NODE_ID" || "$NODE_ID" != Plant-* ]]; then
-  echo "Usage: $0 Plant-NNN" >&2
+  echo "Usage: $0 Plant-NNN [release-name]" >&2
   echo "Example: $0 Plant-080" >&2
+  echo "Example: $0 Plant-080 pico-sensors-0.92" >&2
   exit 1
 fi
 
@@ -38,7 +41,7 @@ fi
 
 echo "=== Migrate wall Pico → $NODE_ID ==="
 echo "UF2: $(basename "$UF2")"
-echo "App: firmware/releases/pico-sensors-0.91"
+echo "App: firmware/releases/$RELEASE_NAME"
 echo "WiFi/server: Plantnet → http://192.168.1.19:5000/api/submit"
 echo
 echo "1) Unplug from wall."
@@ -89,7 +92,7 @@ done
 
 if [[ -z "$PORT" ]]; then
   echo "MicroPython serial not seen yet. Unplug/replug USB (no BOOTSEL) and re-run:" >&2
-  echo "  ./scripts/commission_plant_pico.sh $NODE_ID" >&2
+  echo "  ./scripts/commission_plant_pico.sh $NODE_ID $RELEASE_NAME" >&2
   exit 1
 fi
 
@@ -97,8 +100,8 @@ echo "Found $PORT — verifying bluetooth + network..."
 mpremote connect "$PORT" exec "import bluetooth, network; print('runtime_ok')"
 
 echo "Commissioning app + secrets..."
-./scripts/commission_plant_pico.sh "$NODE_ID"
+./scripts/commission_plant_pico.sh "$NODE_ID" "$RELEASE_NAME"
 
 echo
-echo "Done. Confirm on http://192.168.1.19:5000/check as $NODE_ID"
+echo "Done. Confirm on http://192.168.1.19:5000/check as $NODE_ID ($RELEASE_NAME)"
 echo "Then move back to wall power and verify it keeps posting."

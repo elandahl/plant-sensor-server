@@ -42,6 +42,33 @@ def read_manifest(release_name=None):
         return None
 
 
+def firmware_version_key(version):
+    """Numeric sort key so pico-sensors-0.10 > pico-sensors-0.9 (matches Pico OTA)."""
+    if not version:
+        return ()
+    name = version
+    for prefix in ("pico-sensors-", "pico-aht20-"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    parts = []
+    for part in name.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(part)
+    return tuple(parts)
+
+
+def is_firmware_upgrade(target_version, current_version):
+    """True only when target is strictly newer than current (never downgrade)."""
+    if not target_version or not current_version:
+        return False
+    if target_version == current_version:
+        return False
+    return firmware_version_key(target_version) > firmware_version_key(current_version)
+
+
 def release_directory(release_name=None):
     release_name = release_name or read_latest_release_name()
     if not release_name:
@@ -166,10 +193,13 @@ def submit():
     response = {"status": "received"}
     manifest = read_manifest()
     firmware_version = data.get("firmware_version", "")
-    if manifest and firmware_version and firmware_version != manifest.get("version"):
+    target_version = manifest.get("version") if manifest else None
+    # Match Pico OTA: advertise only upgrades. Selective newer boards (e.g. 0.92
+    # while LATEST is 0.91) must not be told to roll back.
+    if is_firmware_upgrade(target_version, firmware_version):
         response["update_available"] = True
         response["manifest_url"] = request.host_url.rstrip("/") + "/api/firmware/manifest"
-        response["target_version"] = manifest.get("version")
+        response["target_version"] = target_version
 
     return jsonify(response)
 

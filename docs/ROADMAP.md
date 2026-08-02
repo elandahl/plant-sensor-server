@@ -439,10 +439,10 @@ Server should store `attached_sensors` in CSV (`attached_sensors_json` column) f
 ## Feature 3: Measurement integrity — Step 3
 
 **Branch:** `feature/measurement-integrity`  
-**Status:** Planned — after Step 2 for multi-sensor scoring; lab bench can use hardcoded AHT20 earlier  
-**Scope:** Replace the placeholder `integrity` block with a real **sensor health check** that verifies the temperature channel responds to a known physical stimulus. Phase 1 uses a **GPIO-driven heating resistor** placed near the temperature sensor; excitation is either a **time-domain impulse** or **PRBS (pseudo-random binary sequence)** with **cross-correlation** to recover the thermal impulse response.
+**Status:** **Parked** after lab preliminary heater-impulse data (`docs/proposal/PRELIMINARY_DATA.md`). Not part of fleet firmware (`0.91` / selective `0.92`). Return later; do not treat yellow OTA-test integrity or bench heater runs as production.  
+**Scope (when resumed):** Replace the placeholder `integrity` block with a real **sensor health check** that verifies the temperature channel responds to a known physical stimulus. Phase 1 uses a **GPIO-driven heating resistor** placed near the temperature sensor; excitation is either a **time-domain impulse** or **PRBS (pseudo-random binary sequence)** with **cross-correlation** to recover the thermal impulse response.
 
-Today, `pico/main.py` always reports `"state": "green"` with no verification. A stuck, disconnected, or drifting sensor can still produce plausible-looking readings. Integrity testing injects a controlled heat input and checks that the sensor’s temperature trace matches expected dynamics.
+Today, fleet firmware reports integrity from I2C discovery / read errors (or a simple green placeholder on older builds), not from active heater interrogation. A stuck, disconnected, or drifting sensor can still produce plausible-looking readings. Integrity testing injects a controlled heat input and checks that the sensor’s temperature trace matches expected dynamics.
 
 ### Concept
 

@@ -2,6 +2,8 @@
 
 Lab procedure for verifying WiFi OTA end-to-end without changing real sensor readings. Used successfully on **Byrne417_01** (2026-07-06).
 
+**Not fleet firmware.** This yellow-integrity release is only an OTA smoke signal. Do not leave nodes on `pico-aht20-0.4-test`. Current plant baseline is `pico-sensors-0.91` (see [SITES.md](SITES.md)).
+
 ## What you see when it works
 
 | Where | Test signal |

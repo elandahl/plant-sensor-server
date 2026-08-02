@@ -42,7 +42,9 @@ For each Pico moving to (or staying at) a site:
 5. Soft-reset; verify the node appears on **that** site’s `/check` with the correct `NODE_ID`.
 6. Attach the sensor subset for that location (AHT20, ENS160/161, SGP30/40, TMP119 as needed).
 
-### Plant shortcut (current firmware)
+### Plant shortcut (fleet baseline)
+
+**Fleet baseline:** `pico-sensors-0.91` (`firmware/LATEST`). New commissions and OTA targets use this unless you deliberately USB-load something else.
 
 On a Mac on Plantnet, with the Pico on USB and MicroPython already installed:
 
@@ -51,6 +53,21 @@ On a Mac on Plantnet, with the Pico on USB and MicroPython already installed:
 ```
 
 That writes gitignored `pico/secrets.py` for Plantnet → `http://192.168.1.19:5000/api/submit`, copies `firmware/releases/pico-sensors-0.91/` plus `secrets.py` onto the Pico, and hard-resets. Then confirm on http://192.168.1.19:5000/check.
+
+### Selective newer firmware (e.g. 0.92)
+
+`pico-sensors-0.92` adds stronger WiFi handling (`wifi_link.py`): best-AP connect, disable STA power-save, radio reset after bad POSTs, skip BLE when RSSI is weak, and report `wifi_rssi` / `wifi_bssid`. Keep it on **selected** plant boards only for now.
+
+```bash
+./scripts/commission_plant_pico.sh Plant-080 pico-sensors-0.92
+```
+
+Do **not** point `firmware/LATEST` at `0.92` until you want a fleet-wide OTA. While `LATEST` stays `0.91`:
+
+- Baseline boards stay on / upgrade toward `0.91`.
+- Boards already on `0.92` are **not** rolled back (Pico OTA and the submit hint both skip downgrades).
+
+Working tree `pico/` currently matches the optional `0.92` sources; always commission from `firmware/releases/<version>/`, not by copying `pico/` blindly.
 
 ### Migrating old wall Picos (CircuitPython / ancient firmware)
 
@@ -62,6 +79,7 @@ Old plant hangers often run **CircuitPython** or very old MicroPython (`pico-aht
 
 ```bash
 ./scripts/migrate_plant_pico.sh Plant-NNN
+# optional: ./scripts/migrate_plant_pico.sh Plant-NNN pico-sensors-0.92
 ```
 
 That flashes a BT-capable Pico W MicroPython UF2 (from `firmware/uf2/`, gitignored), then runs the same plant commission as above. Put back on wall power and confirm `/check`.
@@ -70,7 +88,7 @@ UF2 used for new plant boards today: **RPI_PICO_W v1.28.0** (same family as lab 
 
 ## Plant Pi
 
-The plant Raspberry Pi 5 should run the same server tree (`app.py`, `firmware/releases/`, `firmware/LATEST`) so OTA and `/check` behave like the lab. Lab and plant firmwares can stay in sync; only Pico `secrets.py` differs by site.
+The plant Raspberry Pi 5 should run the same server tree (`app.py`, `firmware/releases/`, `firmware/LATEST`) so OTA and `/check` behave like the lab. Keep **`firmware/LATEST` = `pico-sensors-0.91`** until a deliberate fleet promotion. Ship the `0.92` release tree on the Pi so USB tooling and manifests exist, but do not promote it via `LATEST`. Lab and plant firmwares can stay in sync; only Pico `secrets.py` differs by site.
 
 **Known plant host (Plantnet LAN):** `192.168.1.19` (`plant-server`), also Tailscale `100.65.123.65`.
 
