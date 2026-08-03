@@ -549,6 +549,9 @@ def plot_page():
             <select id="range-preset">
                 <option value="today" selected>Today</option>
                 <option value="yesterday">Yesterday</option>
+                <option value="last10m">Last 10 minutes</option>
+                <option value="last1h">Last hour</option>
+                <option value="last3h">Last 3 hours</option>
                 <option value="last24h">Last 24 hours</option>
                 <option value="last3d">Last 3 days</option>
                 <option value="last7d">Last 7 days</option>
@@ -578,7 +581,11 @@ def plot_page():
             <button id="preset-ratio-btn" type="button">Ratio shared (first two)</button>
             <button id="preset-xy-btn" type="button">XY shared (first two)</button>
             <label>Tolerance (s)
-                <input id="tol-input" type="number" min="1" step="1" value="60" style="width:4em">
+                <input id="tol-input" type="number" min="1" step="1" value="15" style="width:4em">
+            </label>
+            <label title="Re-plot on a timer; rolling windows slide forward">
+                <input id="auto-refresh" type="checkbox" checked>
+                Auto-refresh (15 s)
             </label>
             <button id="plot-btn" type="button">Plot</button>
         </div>
@@ -598,6 +605,9 @@ def plot_page():
 
     <script>
     const TZ = "America/Chicago";
+    const PLOT_STATE_KEY = "plant-sensor-plot-v1";
+    const PLOT_TOL_DEFAULT = "15";
+    const AUTO_REFRESH_MS = 15000;
     const startSelect = document.getElementById("start-select");
     const endSelect = document.getElementById("end-select");
     const rangePreset = document.getElementById("range-preset");
@@ -608,12 +618,16 @@ def plot_page():
     const readoutPanel = document.getElementById("readout-panel");
     const readoutBody = document.getElementById("readout-body");
     const readoutTime = document.getElementById("readout-time");
+    const tolInput = document.getElementById("tol-input");
+    const autoRefreshEl = document.getElementById("auto-refresh");
 
     let chart = null;
     let metaCache = { nodes: [], fields: [], fields_by_node: {} };
     let rowsInitialized = false;
     let lastPlot = null;
     let cursorMs = null;
+    let autoRefreshTimer = null;
+    let plotInFlight = false;
 
     const COLORS = [
         "#2563eb", "#dc2626", "#16a34a", "#ca8a04",
@@ -621,6 +635,50 @@ def plot_page():
     ];
 
     function setStatus(msg) { statusEl.textContent = msg; }
+
+    function savePlotState() {
+        try {
+            const state = {
+                preset: rangePreset.value,
+                start: startSelect.value,
+                end: endSelect.value,
+                tol: tolInput.value,
+                autoRefresh: !!autoRefreshEl.checked,
+                exprs: rowsInitialized ? collectExprs() : [],
+            };
+            localStorage.setItem(PLOT_STATE_KEY, JSON.stringify(state));
+        } catch (e) { /* ignore quota / private mode */ }
+    }
+
+    function loadPlotState() {
+        try {
+            const raw = localStorage.getItem(PLOT_STATE_KEY);
+            if (!raw) return null;
+            return JSON.parse(raw);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function syncAutoRefresh() {
+        if (autoRefreshTimer) {
+            clearInterval(autoRefreshTimer);
+            autoRefreshTimer = null;
+        }
+        if (!autoRefreshEl.checked) return;
+        autoRefreshTimer = setInterval(() => { refreshPlot(); }, AUTO_REFRESH_MS);
+    }
+
+    async function refreshPlot() {
+        if (plotInFlight || document.hidden) return;
+        const preset = rangePreset.value;
+        if (preset === "last10m" || preset === "last1h" || preset === "last3h" ||
+            preset === "last24h") {
+            applyPreset(preset);
+        }
+        await loadMeta({ preserveExprs: true });
+        await runPlot({ quiet: true });
+    }
 
     function fmtCentral(ms, opts) {
         return new Intl.DateTimeFormat("en-US", Object.assign({ timeZone: TZ }, opts)).format(new Date(ms));
@@ -775,6 +833,26 @@ def plot_page():
         fillSelect(select, availableDates, preferred);
     }
 
+    function applyRollingHours(hours) {
+        const now = Date.now();
+        afterBound = new Date(now - hours * 3600 * 1000).toISOString();
+        const afterDay = afterBound.slice(0, 10);
+        const newest = availableDates[0];
+        const oldest = availableDates[availableDates.length - 1];
+        const daysAsc = availableDates.slice().reverse();
+        let start;
+        if (afterDay <= oldest) start = oldest;
+        else if (availableDates.includes(afterDay)) start = afterDay;
+        else start = daysAsc.find(d => d >= afterDay) || newest;
+        fillDateSelect(startSelect, start);
+        fillDateSelect(endSelect, newest);
+        const label = hours < 1
+            ? Math.round(hours * 60) + " minutes"
+            : (hours === 1 ? "1 hour" : hours + " hours");
+        rangeHint.textContent = "Rolling window (" + label + "): points after " +
+            fmtCentralHint(afterBound) + ".";
+    }
+
     function applyPreset(name) {
         if (!availableDates.length) return;
         afterBound = null;
@@ -789,22 +867,24 @@ def plot_page():
         }
         let start = newest;
         let end = newest;
-        const now = Date.now();
         if (name === "today") {
             start = end = newest;
             rangeHint.textContent = "Single day: " + newest + " (chart times Central).";
         } else if (name === "yesterday") {
             start = end = availableDates[1] || newest;
             rangeHint.textContent = "Single day: " + start + " (chart times Central).";
+        } else if (name === "last10m") {
+            applyRollingHours(10 / 60);
+            return;
+        } else if (name === "last1h") {
+            applyRollingHours(1);
+            return;
+        } else if (name === "last3h") {
+            applyRollingHours(3);
+            return;
         } else if (name === "last24h") {
-            afterBound = new Date(now - 24 * 3600 * 1000).toISOString();
-            const afterDay = afterBound.slice(0, 10);
-            const daysAsc = availableDates.slice().reverse();
-            if (afterDay <= oldest) start = oldest;
-            else if (availableDates.includes(afterDay)) start = afterDay;
-            else start = daysAsc.find(d => d >= afterDay) || newest;
-            end = newest;
-            rangeHint.textContent = "Rolling window: points after " + fmtCentralHint(afterBound) + ".";
+            applyRollingHours(24);
+            return;
         } else if (name === "last3d" || name === "last7d" || name === "last14d") {
             const n = name === "last3d" ? 3 : (name === "last7d" ? 7 : 14);
             const slice = availableDates.slice(0, n);
@@ -837,13 +917,40 @@ def plot_page():
             setStatus("No CSV data files found.");
             return;
         }
+        const saved = loadPlotState();
         fillDateSelect(startSelect, availableDates[0]);
         fillDateSelect(endSelect, availableDates[0]);
-        applyPreset(rangePreset.value);
-        await loadMeta();
+        // Lab CO2-cal branch: keep pairing tight for ~10 s posts (ignore stale 60 s saves).
+        tolInput.value = PLOT_TOL_DEFAULT;
+        if (saved && typeof saved.autoRefresh === "boolean") {
+            autoRefreshEl.checked = saved.autoRefresh;
+        }
+        if (saved && saved.preset &&
+            [...rangePreset.options].some(o => o.value === saved.preset)) {
+            rangePreset.value = saved.preset;
+            applyPreset(saved.preset);
+            if (saved.preset === "custom") {
+                if (saved.start && availableDates.includes(saved.start)) {
+                    startSelect.value = saved.start;
+                }
+                if (saved.end && availableDates.includes(saved.end)) {
+                    endSelect.value = saved.end;
+                }
+            }
+        } else {
+            applyPreset(rangePreset.value);
+        }
+        await loadMeta({
+            restoreExprs: (saved && saved.exprs && saved.exprs.length) ? saved.exprs : null,
+        });
+        if (saved && saved.exprs && saved.exprs.length) {
+            await runPlot({ quiet: true });
+        }
+        syncAutoRefresh();
     }
 
-    async function loadMeta() {
+    async function loadMeta(opts) {
+        opts = opts || {};
         const { start, end, q } = rangeQuery();
         setStatus("Loading " + start + " → " + end + "...");
         const res = await fetch("/api/plot/meta?" + q);
@@ -851,7 +958,8 @@ def plot_page():
             setStatus("No data for " + start + " → " + end);
             return;
         }
-        const prev = rowsInitialized ? collectExprs() : null;
+        const prev = opts.restoreExprs
+            || ((opts.preserveExprs || rowsInitialized) ? collectExprs() : null);
         metaCache = await res.json();
         metaInfo.textContent = metaCache.day_count + " day(s), " + metaCache.row_count +
             " rows, " + metaCache.fields.length + " fields";
@@ -866,6 +974,7 @@ def plot_page():
         }
         rowsInitialized = true;
         setStatus("Ready. Edit expressions and click Plot.");
+        savePlotState();
     }
 
     function destroyChart() {
@@ -1030,55 +1139,66 @@ def plot_page():
         });
     }
 
-    async function runPlot() {
-        const exprs = collectExprs();
-        if (!exprs.length) {
-            setStatus("Add at least one expression.");
-            return;
-        }
-        const ops = new Set(exprs.map(e => e.op));
-        if (ops.has("vs") && [...ops].some(o => o !== "vs")) {
-            setStatus("Cannot mix vs with − / / (none) in one plot.");
-            return;
-        }
-        const { start, end, q } = rangeQuery();
-        const tol = document.getElementById("tol-input").value || "60";
-        const url = "/api/series?" + q + "&mode=expr&tol_s=" + encodeURIComponent(tol) +
-            "&exprs=" + encodeURIComponent(JSON.stringify(exprs));
+    async function runPlot(opts) {
+        opts = opts || {};
+        if (plotInFlight) return;
+        plotInFlight = true;
+        try {
+            const exprs = collectExprs();
+            if (!exprs.length) {
+                setStatus("Add at least one expression.");
+                return;
+            }
+            const ops = new Set(exprs.map(e => e.op));
+            if (ops.has("vs") && [...ops].some(o => o !== "vs")) {
+                setStatus("Cannot mix vs with − / / (none) in one plot.");
+                return;
+            }
+            const { start, end, q } = rangeQuery();
+            const tol = tolInput.value || PLOT_TOL_DEFAULT;
+            const url = "/api/series?" + q + "&mode=expr&tol_s=" + encodeURIComponent(tol) +
+                "&exprs=" + encodeURIComponent(JSON.stringify(exprs));
 
-        setStatus("Plotting...");
-        const res = await fetch(url);
-        const payload = await res.json();
-        if (!res.ok) {
-            setStatus(payload.message || "Plot failed");
-            return;
-        }
-        let total = 0;
-        for (const entry of Object.values(payload.series || {})) total += entry.points.length;
-        if (total === 0) {
-            setStatus("No numeric data for selection.");
-            destroyChart();
-            return;
-        }
-        lastPlot = { payload };
-        cursorMs = null;
-        const rangeLabel = start === end ? start : (start + " → " + end);
-        const parts = [];
-        for (const st of Object.values(payload.stats || {})) {
-            let s = st.matched + " matched";
-            if (st.unmatched) s += " / " + st.unmatched + " unmatched";
-            if (st.skipped) s += " / " + st.skipped + " ÷0 skipped";
-            parts.push(s);
-        }
-        if (payload.kind === "xy") {
-            buildXYChart(payload);
-            setStatus("Plotted " + total + " XY points for " + rangeLabel +
-                " (tol " + payload.tol_s + " s). " + parts.join("; "));
-        } else {
-            buildTimeChart(payload);
-            setStatus("Plotted " + total + " points for " + rangeLabel +
-                (parts.length ? " (" + parts.join("; ") + ")" : "") +
-                ". Click chart for readout.");
+            if (!opts.quiet) setStatus("Plotting...");
+            const res = await fetch(url);
+            const payload = await res.json();
+            if (!res.ok) {
+                setStatus(payload.message || "Plot failed");
+                return;
+            }
+            let total = 0;
+            for (const entry of Object.values(payload.series || {})) total += entry.points.length;
+            if (total === 0) {
+                setStatus("No numeric data for selection.");
+                destroyChart();
+                return;
+            }
+            lastPlot = { payload };
+            const keepCursor = cursorMs;
+            const rangeLabel = start === end ? start : (start + " → " + end);
+            const parts = [];
+            for (const st of Object.values(payload.stats || {})) {
+                let s = st.matched + " matched";
+                if (st.unmatched) s += " / " + st.unmatched + " unmatched";
+                if (st.skipped) s += " / " + st.skipped + " ÷0 skipped";
+                parts.push(s);
+            }
+            if (payload.kind === "xy") {
+                cursorMs = null;
+                buildXYChart(payload);
+                setStatus("Plotted " + total + " XY points for " + rangeLabel +
+                    " (tol " + payload.tol_s + " s). " + parts.join("; "));
+            } else {
+                buildTimeChart(payload);
+                setStatus("Plotted " + total + " points for " + rangeLabel +
+                    (parts.length ? " (" + parts.join("; ") + ")" : "") +
+                    ". Click chart for readout." +
+                    (autoRefreshEl.checked ? " Auto-refresh on." : ""));
+                if (keepCursor != null) updateReadout(keepCursor);
+            }
+            savePlotState();
+        } finally {
+            plotInFlight = false;
         }
     }
 
@@ -1097,7 +1217,10 @@ def plot_page():
         return { a, b, shared };
     }
 
-    document.getElementById("add-expr-btn").addEventListener("click", () => addExprRow({ op: "none" }));
+    document.getElementById("add-expr-btn").addEventListener("click", () => {
+        addExprRow({ op: "none" });
+        savePlotState();
+    });
     document.getElementById("preset-temp-btn").addEventListener("click", () => {
         exprRows.innerHTML = "";
         for (const node of metaCache.nodes) {
@@ -1107,6 +1230,7 @@ def plot_page():
             }
         }
         if (!exprRows.children.length) addExprRow({ op: "none" });
+        savePlotState();
     });
     document.getElementById("preset-diff-btn").addEventListener("click", () => {
         const info = firstTwoShared();
@@ -1119,6 +1243,7 @@ def plot_page():
                 node_b: info.b, field_b: field,
             });
         }
+        savePlotState();
     });
     document.getElementById("preset-ratio-btn").addEventListener("click", () => {
         const info = firstTwoShared();
@@ -1131,6 +1256,7 @@ def plot_page():
                 node_b: info.b, field_b: field,
             });
         }
+        savePlotState();
     });
     document.getElementById("preset-xy-btn").addEventListener("click", () => {
         const info = firstTwoShared();
@@ -1143,26 +1269,44 @@ def plot_page():
                 node_b: info.b, field_b: field,
             });
         }
+        savePlotState();
     });
     rangePreset.addEventListener("change", async () => {
         applyPreset(rangePreset.value);
-        await loadMeta();
+        await loadMeta({ preserveExprs: true });
+        savePlotState();
     });
     startSelect.addEventListener("change", async () => {
         if (rangePreset.value !== "custom") rangePreset.value = "custom";
         startSelect.disabled = false;
         endSelect.disabled = false;
         afterBound = null;
-        await loadMeta();
+        await loadMeta({ preserveExprs: true });
+        savePlotState();
     });
     endSelect.addEventListener("change", async () => {
         if (rangePreset.value !== "custom") rangePreset.value = "custom";
         startSelect.disabled = false;
         endSelect.disabled = false;
         afterBound = null;
-        await loadMeta();
+        await loadMeta({ preserveExprs: true });
+        savePlotState();
     });
-    document.getElementById("plot-btn").addEventListener("click", runPlot);
+    tolInput.addEventListener("change", savePlotState);
+    autoRefreshEl.addEventListener("change", () => {
+        savePlotState();
+        syncAutoRefresh();
+    });
+    exprRows.addEventListener("change", savePlotState);
+    exprRows.addEventListener("click", (ev) => {
+        if (ev.target && ev.target.classList.contains("remove-row")) {
+            setTimeout(savePlotState, 0);
+        }
+    });
+    document.getElementById("plot-btn").addEventListener("click", () => runPlot());
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && autoRefreshEl.checked) refreshPlot();
+    });
 
     loadDates();
     </script>
